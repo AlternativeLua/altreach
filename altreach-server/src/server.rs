@@ -4,9 +4,11 @@ use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::{info, warn, error};
+use zstd::stream::zio::Reader;
 use altreach_proto::*;
 use crate::capture::Capturer;
 use crate::encoder::compress;
+use crate::input;
 
 pub async fn run(addr: &str) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -60,19 +62,25 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
     let frame_interval = tokio::time::Duration::from_millis(33); // ~30fps
 
     loop {
-        let start = tokio::time::Instant::now();
-
-        let (width, height, bytes) = capturer.capture_frame()?;
-        let data = compress(&bytes)?;
-        let encoded = encode(&ServerMessage::Frame { width, height, data })?;
-        writer.write_all(&encoded).await?;
-
-        // Sleep for the remainder of the frame interval.
-        let elapsed = start.elapsed();
-        if elapsed < frame_interval {
-            tokio::time::sleep(frame_interval - elapsed).await;
+        tokio::select! {
+        _ = tokio::time::sleep(frame_interval) => {
+            let (width, height, bytes) = capturer.capture_frame()?;
+            let data = compress(&bytes)?;
+            let encoded = encode(&ServerMessage::Frame { width, height, data })?;
+            writer.write_all(&encoded).await?;
+        }
+        msg = read_message(&mut reader, &mut buf) => {
+            match msg? {
+                ClientMessage::MouseMove { x, y } => input::inject_mouse_move(x, y)?,
+                ClientMessage::MouseButton { button, pressed, .. } => input::inject_mouse_button(&button, pressed)?,
+                ClientMessage::KeyEvent { vk_code, pressed } => input::inject_key(vk_code, pressed)?,
+                ClientMessage::Disconnect { .. } => break Ok(()),
+                _ => {}
+            }
         }
     }
+    }
+
 }
 
 async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Result<OwnedWriteHalf> {
@@ -111,5 +119,23 @@ async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Resul
             
         }
         _ => Ok((writer))
+    }
+}
+
+async fn read_message(reader: &mut OwnedReadHalf, buf: &mut Vec<u8>) -> Result<ClientMessage> {
+    loop {
+        if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
+            buf.drain(..consumed);
+            return Ok(msg);
+        }
+
+        let mut tmp = [0u8; 4096];
+        let n = reader.read(&mut tmp).await?;
+
+        if n == 0 {
+            anyhow::bail!("Connection closed");
+        }
+
+        buf.extend_from_slice(&tmp[..n]);
     }
 }
