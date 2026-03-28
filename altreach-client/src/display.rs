@@ -40,8 +40,8 @@ impl eframe::App for Display {
 
         let mut msgs = Vec::new();
         let mut current_pos = (0i32, 0i32);
+        let screen_rect = ctx.screen_rect();
         ctx.input(|i| {
-            let screen_rect = ctx.screen_rect();
             if let Some(pos) = i.pointer.latest_pos() {
                 let nx = (pos.x / screen_rect.width()) * 65535.0;
                 let ny = (pos.y / screen_rect.height()) * 65535.0;
