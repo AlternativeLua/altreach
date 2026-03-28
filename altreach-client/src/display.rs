@@ -27,7 +27,10 @@ impl eframe::App for Display {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(texture) = &self.texture {
-                ui.image(texture);
+                ui.add(
+                    egui::Image::new(texture)
+                        .fit_to_exact_size(ui.available_size())
+                );
             }
         });
 
