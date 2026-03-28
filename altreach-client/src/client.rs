@@ -1,7 +1,7 @@
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use anyhow::Result;
-use altreach_proto::{ClientMessage, ServerMessage, encode, decode, PROTOCOL_VERSION};
+use altreach_proto::{ClientMessage, ServerMessage, encode, decode};
 
 pub struct Connection {
     stream: TcpStream,
@@ -31,7 +31,7 @@ impl Connection {
             let n = self.stream.read(&mut tmp).await?;
 
             if n == 0 {
-                anyhow::bail!("Connection closed with empty buffer");
+                anyhow::bail!("Connection closed");
             }
 
             self.buf.extend_from_slice(&tmp[..n]);
