@@ -5,6 +5,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::{info, warn, error};
 use altreach_proto::*;
+use crate::capture::Capturer;
+use crate::encoder::compress;
 
 pub async fn run(addr: &str) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -31,31 +33,43 @@ pub async fn run(addr: &str) -> Result<()> {
     }
 }
 
-async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<ClientMessage> {
-    let ( mut reader, writer) = stream.into_split();
+async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
+    let (mut reader, writer) = stream.into_split();
     let mut buf = Vec::new();
 
-    loop {
+    // Auth loop — keep reading until we get a Handshake.
+    let mut writer = loop {
         if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
             buf.drain(..consumed);
-
-            match_message(&msg, writer).await?;
-
-            return Ok(msg);
+            break match_message(&msg, writer).await?;
         }
 
         let mut tmp = [0u8; 4096];
         let n = reader.read(&mut tmp).await?;
 
         if n == 0 {
-            anyhow::bail!("Connection closed with empty buffer");
+            anyhow::bail!("Connection closed before auth");
         }
 
         buf.extend_from_slice(&tmp[..n]);
+    };
+
+    info!("Client {peer} authenticated");
+
+    // Capture loop — stream frames to the client.
+    let mut capturer = Capturer::new()?;
+
+    loop {
+        let (width, height, bytes) = capturer.capture_frame()?;
+        let data = compress(&bytes)?;
+
+        let frame = ServerMessage::Frame { width, height, data };
+        let encoded = encode(&frame)?;
+        writer.write_all(&encoded).await?;
     }
 }
 
-async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Result<()> {
+async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Result<OwnedWriteHalf> {
     match msg {
         ClientMessage::Handshake { version, password } => {
             if version != &PROTOCOL_VERSION {
@@ -76,7 +90,8 @@ async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Resul
                 let bytes = encode(&response_message)?;
 
                 writer.write_all(&bytes).await?;
-                Ok(())
+
+                Ok((writer))
             } else {
                 let error_message = ServerMessage::AuthResult {
                     success: false,
@@ -89,6 +104,6 @@ async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Resul
             }
             
         }
-        _ => Ok(())
+        _ => Ok((writer))
     }
 }
