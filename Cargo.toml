@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "altreach-proto",
+    "altreach-server",
+    "altreach-client",
+]
+resolver = "2"
