@@ -96,7 +96,7 @@ impl eframe::App for Display {
 
 impl Display {
     fn update_frame(&mut self, ctx: &egui::Context, width: u32, height: u32, data: Vec<u8>) {
-        let data = zstd::decode_all(&data[..]).unwrap();
+        let data = lz4_flex::decompress_size_prepended(&data).unwrap();
         let mut rgba = data;
         for pixel in rgba.chunks_exact_mut(4) {
             pixel.swap(0, 2);

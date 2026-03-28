@@ -4,7 +4,6 @@ use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::{info, warn, error};
-use zstd::stream::zio::Reader;
 use altreach_proto::*;
 use crate::capture::Capturer;
 use crate::encoder::compress;
