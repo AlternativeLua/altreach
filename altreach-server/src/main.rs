@@ -10,6 +10,8 @@ use tracing::info;
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     info!("altreach-server starting...");
-    server::run("0.0.0.0:7878").await?;
+    dotenvy::dotenv().ok();
+    let addr = std::env::var("SERVER_ADDR").expect("SERVER_ADDR is not set");
+    server::run(&addr).await?;
     Ok(())
 }

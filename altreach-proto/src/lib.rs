@@ -53,4 +53,4 @@ pub fn decode<T: for<'de> Deserialize<'de>>(
 
 pub const PROTOCOL_VERSION: u32 = 1;
 // Hard coded for now :3
-pub const PASSWORD: &str = "your_password_here";
+pub const PASSWORD: &str = "test";

@@ -10,7 +10,10 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     info!("altreach-client starting...");
 
-    let mut conn = client::Connection::connect("127.0.0.1:7878").await?;
+    dotenvy::dotenv().ok();
+    let addr = std::env::var("SERVER_ADDR").expect("SERVER_ADDR not set");
+
+    let mut conn = client::Connection::connect("addr").await?;
     conn.send(&altreach_proto::ClientMessage::Handshake {
         version: altreach_proto::PROTOCOL_VERSION,
         password: "test".to_string(),
