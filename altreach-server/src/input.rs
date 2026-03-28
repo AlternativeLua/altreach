@@ -10,7 +10,7 @@ pub fn inject_mouse_move(x: i32, y: i32) -> Result<()> {
                 dx: x,
                 dy: y,
                 mouseData: 0,
-                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
                 time: 0,
                 dwExtraInfo: 0,
             }

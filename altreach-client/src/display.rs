@@ -27,7 +27,7 @@ impl eframe::App for Display {
             self.update_frame(ctx, width, height, data);
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
             if let Some(texture) = &self.texture {
                 ui.add(
                     egui::Image::new(texture)
