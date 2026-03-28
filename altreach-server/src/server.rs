@@ -1,10 +1,11 @@
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use anyhow::Result;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::{info, warn, error};
-
 use altreach_proto::*;
+use altreach_proto::ServerMessage::AuthResult;
 
 pub async fn run(addr: &str) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -31,22 +32,48 @@ pub async fn run(addr: &str) -> Result<()> {
     }
 }
 
-async fn handle_client(mut stream: TcpStream, peer: SocketAddr) -> Result<ClientMessage> {
+async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<ClientMessage> {
+    let ( mut reader, writer) = stream.into_split();
     let mut buf = Vec::new();
 
     loop {
         if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
             buf.drain(..consumed);
+
+            match_message(&msg, writer).await?;
+
             return Ok(msg);
         }
 
         let mut tmp = [0u8; 4096];
-        let n = stream.read(&mut tmp).await?;
+        let n = reader.read(&mut tmp).await?;
 
         if n == 0 {
             anyhow::bail!("Connection closed with empty buffer");
         }
 
         buf.extend_from_slice(&tmp[..n]);
+    }
+}
+
+async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Result<()> {
+    match msg {
+        ClientMessage::Handshake { version, password: _ } => {
+            if version != &PROTOCOL_VERSION {
+                Err(anyhow::anyhow!("Wrong version"))
+            } else
+            {
+                let response_message = ServerMessage::AuthResult {
+                    success: true,
+                    reason: None
+                };
+                let bytes = encode(&response_message)?;
+
+                writer.write_all(&bytes).await?;
+                Ok(())
+            }
+            
+        }
+        _ => Ok(())
     }
 }
