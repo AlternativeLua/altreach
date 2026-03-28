@@ -1,7 +1,10 @@
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use anyhow::Result;
+use tokio::io::AsyncReadExt;
 use tracing::{info, warn, error};
+
+use altreach_proto::*;
 
 pub async fn run(addr: &str) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -28,22 +31,22 @@ pub async fn run(addr: &str) -> Result<()> {
     }
 }
 
-async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
-    let (reader, _writer) = stream.into_split();
-    let mut buf = vec![0u8; 1024];
+async fn handle_client(mut stream: TcpStream, peer: SocketAddr) -> Result<ClientMessage> {
+    let mut buf = Vec::new();
 
     loop {
-        reader.readable().await?;
-
-        match reader.try_read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                info!("Received {n} bytes from {peer}");
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e.into()),
+        if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
+            buf.drain(..consumed);
+            return Ok(msg);
         }
-    }
 
-    Ok(())
+        let mut tmp = [0u8; 4096];
+        let n = stream.read(&mut tmp).await?;
+
+        if n == 0 {
+            anyhow::bail!("Connection closed with empty buffer");
+        }
+
+        buf.extend_from_slice(&tmp[..n]);
+    }
 }
