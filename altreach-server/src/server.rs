@@ -58,13 +58,16 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
 
     info!("Client {peer} authenticated");
 
-    let mut capturer = Capturer::new()?;
+    let capturer = std::sync::Arc::new(std::sync::Mutex::new(Capturer::new()?));
     let frame_interval = tokio::time::Duration::from_millis(33); // ~30fps
 
     loop {
         tokio::select! {
         _ = tokio::time::sleep(frame_interval) => {
-            let (width, height, bytes) = capturer.capture_frame()?;
+            let cap = capturer.clone();
+            let (width, height, bytes) = tokio::task::spawn_blocking(move || {
+                cap.lock().unwrap().capture_frame()
+            }).await??;
             let data = compress(&bytes)?;
             let encoded = encode(&ServerMessage::Frame { width, height, data })?;
             writer.write_all(&encoded).await?;

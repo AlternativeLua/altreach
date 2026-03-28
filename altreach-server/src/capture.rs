@@ -11,6 +11,8 @@ pub struct Capturer {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
+    staging: Option<ID3D11Texture2D>,
+    staging_size: (u32, u32),
 }
 
 impl Capturer {
@@ -34,14 +36,13 @@ impl Capturer {
             let device = device.unwrap();
             let context = context.unwrap();
 
-            // Walk the DXGI chain to get to the output duplication handle.
             let dxgi_device: IDXGIDevice = device.cast()?;
             let adapter: IDXGIAdapter = dxgi_device.GetAdapter()?;
-            let output: IDXGIOutput = adapter.EnumOutputs(0)?; // 0 = first monitor
+            let output: IDXGIOutput = adapter.EnumOutputs(0)?;
             let output1: IDXGIOutput1 = output.cast()?;
             let duplication = output1.DuplicateOutput(&device)?;
 
-            Ok(Self { device, context, duplication })
+            Ok(Self { device, context, duplication, staging: None, staging_size: (0, 0) })
         }
     }
 
@@ -50,32 +51,38 @@ impl Capturer {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
             self.duplication.AcquireNextFrame(500, &mut frame_info, &mut resource)?;
-            let mut gpu_texture: ID3D11Texture2D = resource.unwrap().cast()?;
+            let gpu_texture: ID3D11Texture2D = resource.unwrap().cast()?;
 
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             gpu_texture.GetDesc(&mut desc);
-            desc.Usage = D3D11_USAGE_STAGING;
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-            desc.BindFlags = 0;
-            desc.MiscFlags = 0;
-            desc.MipLevels = 1;
-            desc.ArraySize = 1;
-            desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+            let width = desc.Width;
+            let height = desc.Height;
 
-            let mut staging: Option<ID3D11Texture2D> = None;
-            self.device.CreateTexture2D(&desc, None, Some(&mut staging))?;
-            let staging = staging.unwrap();
+            // Reuse the staging texture if dimensions haven't changed.
+            if self.staging.is_none() || self.staging_size != (width, height) {
+                desc.Usage = D3D11_USAGE_STAGING;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                desc.BindFlags = 0;
+                desc.MiscFlags = 0;
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
 
-            self.context.CopyResource(&staging, &gpu_texture);
+                let mut staging: Option<ID3D11Texture2D> = None;
+                self.device.CreateTexture2D(&desc, None, Some(&mut staging))?;
+                self.staging = staging;
+                self.staging_size = (width, height);
+            }
+
+            let staging = self.staging.as_ref().unwrap();
+
+            self.context.CopyResource(staging, &gpu_texture);
 
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.context.Map(&staging.cast::<ID3D11Resource>()?, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
 
-            let width = desc.Width;
-            let height = desc.Height;
             let row_pitch = mapped.RowPitch as usize;
             let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-
             let data = mapped.pData as *const u8;
 
             for row in 0..height as usize {
@@ -89,5 +96,4 @@ impl Capturer {
             Ok((width, height, pixels))
         }
     }
-
 }
