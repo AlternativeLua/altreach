@@ -53,6 +53,13 @@ impl eframe::App for Display {
         }
 
         ctx.input(|i| {
+            if let Some(pos) = i.pointer.latest_pos() {
+                let nx = (pos.x / screen_rect.width()).clamp(0.0, 1.0) * 65535.0;
+                let ny = (pos.y / screen_rect.height()).clamp(0.0, 1.0) * 65535.0;
+                current_pos = (nx as i32, ny as i32);
+                msgs.push(ClientMessage::MouseMove { x: current_pos.0, y: current_pos.1 });
+            }
+
             for event in &i.events {
                 match event {
                     egui::Event::PointerButton { button, pressed, pos, .. } => {
