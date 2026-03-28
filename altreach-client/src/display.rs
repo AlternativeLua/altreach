@@ -84,6 +84,14 @@ impl eframe::App for Display {
                             pressed: *pressed,
                         });
                     }
+
+                    egui::Event::MouseWheel { delta, .. } => {
+                        msgs.push(ClientMessage::MouseScroll {
+                            delta_x: delta.x as i32,
+                            delta_y: delta.y as i32,
+                        });
+                    }
+                    
                     _ => {}
                 }
             }

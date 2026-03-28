@@ -76,6 +76,7 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
                 ClientMessage::MouseMove { x, y } => input::inject_mouse_move(x, y)?,
                 ClientMessage::MouseButton { button, pressed, .. } => input::inject_mouse_button(&button, pressed)?,
                 ClientMessage::KeyEvent { vk_code, pressed } => input::inject_key(vk_code, pressed)?,
+                ClientMessage::MouseScroll { delta_x, delta_y } => input::inject_mouse_scroll(delta_x, delta_y)?,
                 ClientMessage::Disconnect { .. } => break Ok(()),
                 _ => {}
             }

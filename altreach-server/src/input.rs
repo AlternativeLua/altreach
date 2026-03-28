@@ -63,3 +63,42 @@ pub fn inject_key(vk_code: u16, pressed: bool) -> Result<()> {
 
     Ok(())
 }
+
+pub fn inject_mouse_scroll(delta_x: i32, delta_y: i32) -> Result<()> {
+    if delta_y != 0 {
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: delta_y as u32 * 120,
+                    dwFlags: MOUSEEVENTF_WHEEL,
+                    time: 0,
+                    dwExtraInfo: 0,
+                }
+            }
+        };
+
+        unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
+    }
+    if delta_x != 0 {
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: delta_x as u32 * 120,
+                    dwFlags: MOUSEEVENTF_HWHEEL,
+                    time: 0,
+                    dwExtraInfo: 0,
+                }
+            }
+        };
+
+        unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
+    }
+
+    Ok(())
+}
