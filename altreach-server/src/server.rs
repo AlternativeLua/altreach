@@ -5,7 +5,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::{info, warn, error};
 use altreach_proto::*;
-use altreach_proto::ServerMessage::AuthResult;
 
 pub async fn run(addr: &str) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -58,10 +57,17 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<ClientMess
 
 async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Result<()> {
     match msg {
-        ClientMessage::Handshake { version, password: _ } => {
+        ClientMessage::Handshake { version, password } => {
             if version != &PROTOCOL_VERSION {
+                let error_message = ServerMessage::AuthResult {
+                    success: false,
+                    reason: Some(String::from("Wrong protocol version")),
+                };
+                let bytes = encode(&error_message)?;
+                writer.write_all(&bytes).await?;
+
                 Err(anyhow::anyhow!("Wrong version"))
-            } else
+            } else if password == PASSWORD
             {
                 let response_message = ServerMessage::AuthResult {
                     success: true,
@@ -71,6 +77,15 @@ async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Resul
 
                 writer.write_all(&bytes).await?;
                 Ok(())
+            } else {
+                let error_message = ServerMessage::AuthResult {
+                    success: false,
+                    reason: Some(String::from("Wrong password")),
+                };
+                let bytes = encode(&error_message)?;
+                writer.write_all(&bytes).await?;
+
+                Err(anyhow::anyhow!("Wrong password"))
             }
             
         }
