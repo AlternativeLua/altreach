@@ -8,8 +8,7 @@ use tracing::info;
 use altreach_proto::{ClientMessage, ServerMessage, PROTOCOL_VERSION};
 use display::Display;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     dotenvy::dotenv().ok();
 
@@ -17,8 +16,11 @@ async fn main() -> Result<()> {
     let password = std::env::var("PASSWORD").expect("PASSWORD not set");
 
     let (tx, rx) = mpsc::channel::<ServerMessage>();
-    
-    tokio::spawn(async move {
+
+    // Spawn the network task on a background tokio runtime,
+    // freeing the main thread for egui which needs it on macOS.
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.spawn(async move {
         let mut conn = match client::Connection::connect(&addr).await {
             Ok(c) => c,
             Err(e) => { tracing::error!("Failed to connect: {e}"); return; }
@@ -41,7 +43,8 @@ async fn main() -> Result<()> {
             }
         }
     });
-    
+
+    // eframe takes over the main thread here — required on macOS.
     eframe::run_native(
         "altreach",
         eframe::NativeOptions {
