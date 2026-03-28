@@ -15,12 +15,9 @@ fn main() -> Result<()> {
     let addr = std::env::var("SERVER_ADDR").expect("SERVER_ADDR not set");
     let password = std::env::var("PASSWORD").expect("PASSWORD not set");
 
-    let (tx, rx) = mpsc::channel::<ServerMessage>();
+    let (frame_tx, frame_rx) = mpsc::channel::<ServerMessage>();
+    let (input_tx, input_rx) = mpsc::channel::<ClientMessage>();
 
-    // Spawn the network task on a background tokio runtime,
-    // freeing the main thread for egui which needs it on macOS.
-    // Run the entire tokio runtime on a background thread so it never
-    // touches the main thread, which macOS requires for the UI event loop.
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
@@ -40,15 +37,22 @@ fn main() -> Result<()> {
             info!("Handshake sent");
 
             loop {
+                // Drain any pending input events and send them to the server.
+                while let Ok(msg) = input_rx.try_recv() {
+                    if let Err(e) = conn.send(&msg).await {
+                        tracing::error!("Failed to send input: {e}");
+                        return;
+                    }
+                }
+
                 match conn.recv().await {
-                    Ok(msg) => { let _ = tx.send(msg); }
+                    Ok(msg) => { let _ = frame_tx.send(msg); }
                     Err(e) => { tracing::error!("Disconnected: {e}"); break; }
                 }
             }
         });
     });
 
-    // eframe takes over the main thread here — required on macOS.
     eframe::run_native(
         "altreach",
         eframe::NativeOptions {
@@ -57,7 +61,7 @@ fn main() -> Result<()> {
                 .with_title("altreach"),
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(Display::new(rx)))),
+        Box::new(|_cc| Ok(Box::new(Display::new(frame_rx, input_tx)))),
     ).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     Ok(())

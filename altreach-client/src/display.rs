@@ -1,15 +1,17 @@
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use egui::{ColorImage, TextureHandle};
-use altreach_proto::ServerMessage;
+use altreach_proto::{ClientMessage, ServerMessage};
+use crate::input::egui_key_to_vk;
 
 pub struct Display {
     texture: Option<TextureHandle>,
     receiver: Receiver<ServerMessage>,
+    sender: Sender<ClientMessage>,
 }
 
 impl Display {
-    pub fn new(receiver: Receiver<ServerMessage>) -> Self {
-        Self { texture: None, receiver }
+    pub fn new(receiver: Receiver<ServerMessage>, sender: Sender<ClientMessage>) -> Self {
+        Self { texture: None, receiver, sender }
     }
 }
 
@@ -35,6 +37,74 @@ impl eframe::App for Display {
         });
 
         ctx.request_repaint();
+
+        let mut msgs = Vec::new();
+        let mut current_pos = (0i32, 0i32);
+        ctx.input(|i| {
+            if let Some(pos) = i.pointer.latest_pos() {
+                current_pos = (pos.x as i32, pos.y as i32);
+                msgs.push(ClientMessage::MouseMove { x: current_pos.0, y: current_pos.1 });
+            }
+
+            if i.pointer.button_pressed(egui::PointerButton::Primary) {
+                msgs.push(ClientMessage::MouseButton {
+                    button: altreach_proto::MouseButton::Left,
+                    pressed: true,
+                    x: current_pos.0,
+                    y: current_pos.1,
+                });
+            } else if i.pointer.button_released(egui::PointerButton::Primary) {
+                msgs.push(ClientMessage::MouseButton {
+                    button: altreach_proto::MouseButton::Left,
+                    pressed: false,
+                    x: current_pos.0,
+                    y: current_pos.1,
+                });
+            }
+            if i.pointer.button_pressed(egui::PointerButton::Secondary) {
+                msgs.push(ClientMessage::MouseButton {
+                    button: altreach_proto::MouseButton::Right,
+                    pressed: true,
+                    x: current_pos.0,
+                    y: current_pos.1,
+                });
+            } else if i.pointer.button_released(egui::PointerButton::Secondary) {
+                msgs.push(ClientMessage::MouseButton {
+                    button: altreach_proto::MouseButton::Right,
+                    pressed: false,
+                    x: current_pos.0,
+                    y: current_pos.1,
+                });
+            }
+            if i.pointer.button_pressed(egui::PointerButton::Middle) {
+                msgs.push(ClientMessage::MouseButton {
+                    button: altreach_proto::MouseButton::Middle,
+                    pressed: true,
+                    x: current_pos.0,
+                    y: current_pos.1,
+                });
+            } else if i.pointer.button_released(egui::PointerButton::Middle) {
+                msgs.push(ClientMessage::MouseButton {
+                    button: altreach_proto::MouseButton::Middle,
+                    pressed: false,
+                    x: current_pos.0,
+                    y: current_pos.1,
+                });
+            }
+
+            for event in &i.events {
+                if let egui::Event::Key { key, pressed, .. } = event {
+                    msgs.push(ClientMessage::KeyEvent {
+                        vk_code: egui_key_to_vk(*key),
+                        pressed: *pressed,
+                    });
+                }
+            }
+
+        });
+        for msg in msgs {
+            let _ = self.sender.send(msg);
+        }
     }
 }
 
