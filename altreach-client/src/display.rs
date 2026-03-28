@@ -41,8 +41,11 @@ impl eframe::App for Display {
         let mut msgs = Vec::new();
         let mut current_pos = (0i32, 0i32);
         ctx.input(|i| {
+            let screen_rect = ctx.screen_rect();
             if let Some(pos) = i.pointer.latest_pos() {
-                current_pos = (pos.x as i32, pos.y as i32);
+                let nx = (pos.x / screen_rect.width()) * 65535.0;
+                let ny = (pos.y / screen_rect.height()) * 65535.0;
+                current_pos = (nx as i32, ny as i32);
                 msgs.push(ClientMessage::MouseMove { x: current_pos.0, y: current_pos.1 });
             }
 
