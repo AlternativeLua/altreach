@@ -56,16 +56,22 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
 
     info!("Client {peer} authenticated");
 
-    // Capture loop — stream frames to the client.
     let mut capturer = Capturer::new()?;
+    let frame_interval = tokio::time::Duration::from_millis(33); // ~30fps
 
     loop {
+        let start = tokio::time::Instant::now();
+
         let (width, height, bytes) = capturer.capture_frame()?;
         let data = compress(&bytes)?;
-
-        let frame = ServerMessage::Frame { width, height, data };
-        let encoded = encode(&frame)?;
+        let encoded = encode(&ServerMessage::Frame { width, height, data })?;
         writer.write_all(&encoded).await?;
+
+        // Sleep for the remainder of the frame interval.
+        let elapsed = start.elapsed();
+        if elapsed < frame_interval {
+            tokio::time::sleep(frame_interval - elapsed).await;
+        }
     }
 }
 

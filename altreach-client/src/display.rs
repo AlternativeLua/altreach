@@ -15,10 +15,14 @@ impl Display {
 
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Drain the channel but only render the latest frame.
+        // The server sends faster than we can render, so we skip stale frames.
+        let mut latest = None;
         while let Ok(msg) = self.receiver.try_recv() {
-            if let ServerMessage::Frame { width, height, data } = msg {
-                self.update_frame(ctx, width, height, data);
-            }
+            latest = Some(msg);
+        }
+        if let Some(ServerMessage::Frame { width, height, data }) = latest {
+            self.update_frame(ctx, width, height, data);
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
