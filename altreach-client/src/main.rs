@@ -44,7 +44,12 @@ async fn main() -> Result<()> {
     
     eframe::run_native(
         "altreach",
-        eframe::NativeOptions::default(),
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([1280.0, 720.0])
+                .with_title("altreach"),
+            ..Default::default()
+        },
         Box::new(|_cc| Ok(Box::new(Display::new(rx)))),
     ).map_err(|e| anyhow::anyhow!("{e}"))?;
 

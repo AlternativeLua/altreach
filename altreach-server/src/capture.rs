@@ -53,11 +53,14 @@ impl Capturer {
             let mut gpu_texture: ID3D11Texture2D = resource.unwrap().cast()?;
 
             let mut desc = D3D11_TEXTURE2D_DESC::default();
+            gpu_texture.GetDesc(&mut desc);
             desc.Usage = D3D11_USAGE_STAGING;
             desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
             desc.BindFlags = 0;
             desc.MiscFlags = 0;
-            gpu_texture.GetDesc(&mut desc);
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
 
             let mut staging: Option<ID3D11Texture2D> = None;
             self.device.CreateTexture2D(&desc, None, Some(&mut staging))?;
