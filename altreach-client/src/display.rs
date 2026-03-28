@@ -7,11 +7,12 @@ pub struct Display {
     texture: Option<TextureHandle>,
     receiver: Receiver<ServerMessage>,
     sender: Sender<ClientMessage>,
+    remote_size: Option<(u32, u32)>,
 }
 
 impl Display {
     pub fn new(receiver: Receiver<ServerMessage>, sender: Sender<ClientMessage>) -> Self {
-        Self { texture: None, receiver, sender }
+        Self { texture: None, receiver, sender, remote_size: None }
     }
 }
 
@@ -41,10 +42,28 @@ impl eframe::App for Display {
         let mut msgs = Vec::new();
         let mut current_pos = (0i32, 0i32);
         let screen_rect = ctx.screen_rect();
+
+        // Calculate the actual rect the image occupies, accounting for letterboxing.
+        let image_rect = if let Some((rw, rh)) = self.remote_size {
+            let remote_aspect = rw as f32 / rh as f32;
+            let window_aspect = screen_rect.width() / screen_rect.height();
+            if remote_aspect > window_aspect {
+                let h = screen_rect.width() / remote_aspect;
+                let y = (screen_rect.height() - h) / 2.0;
+                egui::Rect::from_min_size(egui::pos2(0.0, y), egui::vec2(screen_rect.width(), h))
+            } else {
+                let w = screen_rect.height() * remote_aspect;
+                let x = (screen_rect.width() - w) / 2.0;
+                egui::Rect::from_min_size(egui::pos2(x, 0.0), egui::vec2(w, screen_rect.height()))
+            }
+        } else {
+            screen_rect
+        };
+
         ctx.input(|i| {
             if let Some(pos) = i.pointer.latest_pos() {
-                let nx = (pos.x / screen_rect.width()) * 65535.0;
-                let ny = (pos.y / screen_rect.height()) * 65535.0;
+                let nx = ((pos.x - image_rect.min.x) / image_rect.width()).clamp(0.0, 1.0) * 65535.0;
+                let ny = ((pos.y - image_rect.min.y) / image_rect.height()).clamp(0.0, 1.0) * 65535.0;
                 current_pos = (nx as i32, ny as i32);
                 msgs.push(ClientMessage::MouseMove { x: current_pos.0, y: current_pos.1 });
             }
@@ -124,6 +143,7 @@ impl Display {
             &rgba,
         );
 
+        self.remote_size = Some((width, height));
         self.texture = Some(ctx.load_texture("frame", image, Default::default()));
     }
 }
