@@ -53,68 +53,33 @@ impl eframe::App for Display {
         }
 
         ctx.input(|i| {
-            if let Some(pos) = i.pointer.latest_pos() {
-                let nx = (pos.x / screen_rect.width()).clamp(0.0, 1.0) * 65535.0;
-                let ny = (pos.y / screen_rect.height()).clamp(0.0, 1.0) * 65535.0;
-                current_pos = (nx as i32, ny as i32);
-                msgs.push(ClientMessage::MouseMove { x: current_pos.0, y: current_pos.1 });
-            }
-
-            if i.pointer.button_pressed(egui::PointerButton::Primary) {
-                msgs.push(ClientMessage::MouseButton {
-                    button: altreach_proto::MouseButton::Left,
-                    pressed: true,
-                    x: current_pos.0,
-                    y: current_pos.1,
-                });
-            } else if i.pointer.button_released(egui::PointerButton::Primary) {
-                msgs.push(ClientMessage::MouseButton {
-                    button: altreach_proto::MouseButton::Left,
-                    pressed: false,
-                    x: current_pos.0,
-                    y: current_pos.1,
-                });
-            }
-            if i.pointer.button_pressed(egui::PointerButton::Secondary) {
-                msgs.push(ClientMessage::MouseButton {
-                    button: altreach_proto::MouseButton::Right,
-                    pressed: true,
-                    x: current_pos.0,
-                    y: current_pos.1,
-                });
-            } else if i.pointer.button_released(egui::PointerButton::Secondary) {
-                msgs.push(ClientMessage::MouseButton {
-                    button: altreach_proto::MouseButton::Right,
-                    pressed: false,
-                    x: current_pos.0,
-                    y: current_pos.1,
-                });
-            }
-            if i.pointer.button_pressed(egui::PointerButton::Middle) {
-                msgs.push(ClientMessage::MouseButton {
-                    button: altreach_proto::MouseButton::Middle,
-                    pressed: true,
-                    x: current_pos.0,
-                    y: current_pos.1,
-                });
-            } else if i.pointer.button_released(egui::PointerButton::Middle) {
-                msgs.push(ClientMessage::MouseButton {
-                    button: altreach_proto::MouseButton::Middle,
-                    pressed: false,
-                    x: current_pos.0,
-                    y: current_pos.1,
-                });
-            }
-
             for event in &i.events {
-                if let egui::Event::Key { key, pressed, .. } = event {
-                    msgs.push(ClientMessage::KeyEvent {
-                        vk_code: egui_key_to_vk(*key),
-                        pressed: *pressed,
-                    });
+                match event {
+                    egui::Event::PointerButton { button, pressed, pos, .. } => {
+                        let nx = ((pos.x) / screen_rect.width()).clamp(0.0, 1.0) * 65535.0;
+                        let ny = ((pos.y) / screen_rect.height()).clamp(0.0, 1.0) * 65535.0;
+                        let proto_button = match button {
+                            egui::PointerButton::Primary => altreach_proto::MouseButton::Left,
+                            egui::PointerButton::Secondary => altreach_proto::MouseButton::Right,
+                            egui::PointerButton::Middle => altreach_proto::MouseButton::Middle,
+                            _ => continue,
+                        };
+                        msgs.push(ClientMessage::MouseButton {
+                            button: proto_button,
+                            pressed: *pressed,
+                            x: nx as i32,
+                            y: ny as i32,
+                        });
+                    }
+                    egui::Event::Key { key, pressed, .. } => {
+                        msgs.push(ClientMessage::KeyEvent {
+                            vk_code: egui_key_to_vk(*key),
+                            pressed: *pressed,
+                        });
+                    }
+                    _ => {}
                 }
             }
-
         });
         for msg in msgs {
             let _ = self.sender.send(msg);
