@@ -72,7 +72,7 @@ pub fn inject_mouse_scroll(delta_x: i32, delta_y: i32) -> Result<()> {
                 mi: MOUSEINPUT {
                     dx: 0,
                     dy: 0,
-                    mouseData: delta_y as u32 * 120,
+                    mouseData: (delta_y * 10) as u32,
                     dwFlags: MOUSEEVENTF_WHEEL,
                     time: 0,
                     dwExtraInfo: 0,
@@ -89,7 +89,7 @@ pub fn inject_mouse_scroll(delta_x: i32, delta_y: i32) -> Result<()> {
                 mi: MOUSEINPUT {
                     dx: 0,
                     dy: 0,
-                    mouseData: delta_x as u32 * 120,
+                    mouseData: (delta_x * 10) as u32,
                     dwFlags: MOUSEEVENTF_HWHEEL,
                     time: 0,
                     dwExtraInfo: 0,
