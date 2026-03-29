@@ -8,27 +8,46 @@ pub struct Display {
     receiver: Receiver<ServerMessage>,
     sender: Sender<ClientMessage>,
     remote_size: Option<(u32, u32)>,
+    clipboard: arboard::Clipboard,
+    last_clipboard: String,
 }
 
 impl Display {
     pub fn new(receiver: Receiver<ServerMessage>, sender: Sender<ClientMessage>) -> Self {
-        Self { texture: None, receiver, sender, remote_size: None }
+        Self {
+            texture: None,
+            receiver,
+            sender,
+            remote_size: None,
+            clipboard: arboard::Clipboard::new().expect("Failed to init clipboard"),
+            last_clipboard: String::new(),
+        }
     }
 }
 
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle incoming server messages.
         let mut latest_frame = None;
         while let Ok(msg) = self.receiver.try_recv() {
             match msg {
                 ServerMessage::ClipboardSync { text } => {
-                    ctx.output_mut(|o| o.copied_text = text);
+                    self.clipboard.set_text(&text).ok();
+                    self.last_clipboard = text;
                 }
                 _ => latest_frame = Some(msg),
             }
         }
         if let Some(ServerMessage::Frame { width, height, data }) = latest_frame {
             self.update_frame(ctx, width, height, data);
+        }
+
+        // Poll local clipboard and send to server if it changed.
+        if let Ok(text) = self.clipboard.get_text() {
+            if text != self.last_clipboard {
+                self.last_clipboard = text.clone();
+                let _ = self.sender.send(ClientMessage::ClipboardSync { text });
+            }
         }
 
         egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
@@ -81,7 +100,12 @@ impl eframe::App for Display {
                             y: ny as i32,
                         });
                     }
-                    egui::Event::Key { key, pressed, .. } => {
+                    egui::Event::Key { key, pressed, modifiers, .. } => {
+                        // Intercept Cmd+C/V/X on Mac and handle as clipboard,
+                        // don't forward them as raw keypresses to Windows.
+                        if modifiers.mac_cmd {
+                            return;
+                        }
                         msgs.push(ClientMessage::KeyEvent {
                             vk_code: egui_key_to_vk(*key),
                             pressed: *pressed,

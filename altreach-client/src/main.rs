@@ -36,17 +36,7 @@ fn main() -> Result<()> {
 
             info!("Handshake sent");
 
-            let mut clipboard = arboard::Clipboard::new().unwrap();
-            let mut last_clipboard = String::new();
-
             loop {
-                if let Ok(text) = clipboard.get_text() {
-                    if text != last_clipboard {
-                        last_clipboard = text.clone();
-                        let _ = conn.send(&ClientMessage::ClipboardSync { text }).await;
-                    }
-                }
-                
                 while let Ok(msg) = input_rx.try_recv() {
                     if let Err(e) = conn.send(&msg).await {
                         tracing::error!("Failed to send input: {e}");
@@ -55,9 +45,6 @@ fn main() -> Result<()> {
                 }
 
                 match conn.recv().await {
-                    Ok(ServerMessage::ClipboardSync { text }) => {
-                        clipboard.set_text(text).ok();
-                    }
                     Ok(msg) => { let _ = frame_tx.send(msg); }
                     Err(e) => { tracing::error!("Disconnected: {e}"); break; }
                 }
