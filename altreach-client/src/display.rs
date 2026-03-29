@@ -101,10 +101,9 @@ impl eframe::App for Display {
                         });
                     }
                     egui::Event::Key { key, pressed, modifiers, .. } => {
-                        // Intercept Cmd+C/V/X on Mac and handle as clipboard,
-                        // don't forward them as raw keypresses to Windows.
+                        // Translate Mac Cmd key to Windows Ctrl key.
                         if modifiers.mac_cmd {
-                            return;
+                            msgs.push(ClientMessage::KeyEvent { vk_code: 0x11, pressed: *pressed });
                         }
                         msgs.push(ClientMessage::KeyEvent {
                             vk_code: egui_key_to_vk(*key),

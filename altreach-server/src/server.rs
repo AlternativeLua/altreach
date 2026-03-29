@@ -59,12 +59,13 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
     info!("Client {peer} authenticated");
 
     let capturer = std::sync::Arc::new(std::sync::Mutex::new(Capturer::new()?));
-    let frame_interval = Duration::from_millis(33); // ~30fps
+    let mut frame_ticker = tokio::time::interval(Duration::from_millis(33));
+    let mut clipboard_ticker = tokio::time::interval(Duration::from_secs(1));
     let mut last_clipboard = String::new();
 
     loop {
         tokio::select! {
-        _ = tokio::time::sleep(frame_interval) => {
+        _ = frame_ticker.tick() => {
             let cap = capturer.clone();
             let (width, height, bytes) = tokio::task::spawn_blocking(move || {
                 cap.lock().unwrap().capture_frame()
@@ -73,7 +74,7 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
             let encoded = encode(&ServerMessage::Frame { width, height, data })?;
             writer.write_all(&encoded).await?;
         }
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
+        _ = clipboard_ticker.tick() => {
             if let Some(text) = clipboard::get_clipboard() {
                 if text != last_clipboard {
                     last_clipboard = text.clone();
