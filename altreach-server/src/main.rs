@@ -12,7 +12,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     info!("altreach-server starting...");
     dotenvy::dotenv().ok();
-    let addr = std::env::var("SERVER_ADDR").expect("SERVER_ADDR is not set");
+    let addr = std::env::var("BIND_ADDR").expect("BIND_ADDR is not set");
     server::run(&addr).await?;
     Ok(())
 }

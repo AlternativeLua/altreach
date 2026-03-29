@@ -55,6 +55,7 @@ impl eframe::App for Display {
             }
         }
 
+        let mut copy_triggered = false;
         ctx.input(|i| {
             if let Some(pos) = i.pointer.latest_pos() {
                 let nx = (pos.x / screen_rect.width()).clamp(0.0, 1.0) * 65535.0;
@@ -66,8 +67,8 @@ impl eframe::App for Display {
             for event in &i.events {
                 match event {
                     egui::Event::PointerButton { button, pressed, pos, .. } => {
-                        let nx = ((pos.x) / screen_rect.width()).clamp(0.0, 1.0) * 65535.0;
-                        let ny = ((pos.y) / screen_rect.height()).clamp(0.0, 1.0) * 65535.0;
+                        let nx = (pos.x / screen_rect.width()).clamp(0.0, 1.0) * 65535.0;
+                        let ny = (pos.y / screen_rect.height()).clamp(0.0, 1.0) * 65535.0;
                         let proto_button = match button {
                             egui::PointerButton::Primary => altreach_proto::MouseButton::Left,
                             egui::PointerButton::Secondary => altreach_proto::MouseButton::Right,
@@ -87,28 +88,30 @@ impl eframe::App for Display {
                             pressed: *pressed,
                         });
                     }
-
                     egui::Event::MouseWheel { delta, .. } => {
                         msgs.push(ClientMessage::MouseScroll {
                             delta_x: delta.x as i32,
                             delta_y: delta.y as i32,
                         });
                     }
-
                     egui::Event::Copy | egui::Event::Cut => {
-                        msgs.push(ClientMessage::ClipboardSync {
-                            text: ctx.output(|o| o.copied_text.clone()),
-                        })
+                        copy_triggered = true;
                     }
-
                     egui::Event::Paste(text) => {
                         msgs.push(ClientMessage::ClipboardSync { text: text.clone() });
                     }
-
                     _ => {}
                 }
             }
         });
+
+        if copy_triggered {
+            let text = ctx.output(|o| o.copied_text.clone());
+            if !text.is_empty() {
+                msgs.push(ClientMessage::ClipboardSync { text });
+            }
+        }
+
         for msg in msgs {
             let _ = self.sender.send(msg);
         }
