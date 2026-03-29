@@ -1,8 +1,6 @@
 use std::sync::mpsc::{Receiver, Sender};
 use egui::{ColorImage, TextureHandle};
-use altreach_proto::{ClientMessage, ServerMessage};
-use openh264::decoder::Decoder;
-use openh264::formats::YUVSource;
+use altreach_proto::{ClientMessage, FramePatch, ServerMessage};
 use crate::input::egui_key_to_vk;
 
 pub struct Display {
@@ -12,7 +10,8 @@ pub struct Display {
     remote_size: Option<(u32, u32)>,
     clipboard: arboard::Clipboard,
     last_clipboard: String,
-    decoder: Decoder,
+    frame_buffer: Vec<u8>,
+    frame_size: (u32, u32),
 }
 
 impl Display {
@@ -24,24 +23,72 @@ impl Display {
             remote_size: None,
             clipboard: arboard::Clipboard::new().expect("Failed to init clipboard"),
             last_clipboard: String::new(),
-            decoder: Decoder::new().expect("Failed to init H264 decoder"),
+            frame_buffer: Vec::new(),
+            frame_size: (0, 0),
         }
+    }
+
+    fn apply_patches(&mut self, screen_width: u32, screen_height: u32, patches: Vec<FramePatch>) {
+        if self.frame_size != (screen_width, screen_height) {
+            self.frame_buffer = vec![0u8; (screen_width * screen_height * 4) as usize];
+            self.frame_size = (screen_width, screen_height);
+        }
+
+        for patch in patches {
+            let decompressed = match lz4_flex::decompress_size_prepended(&patch.data) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            for row in 0..patch.height as usize {
+                let src_start = row * patch.width as usize * 4;
+                let dst_start = ((patch.y as usize + row) * screen_width as usize + patch.x as usize) * 4;
+                let len = patch.width as usize * 4;
+                self.frame_buffer[dst_start..dst_start + len]
+                    .copy_from_slice(&decompressed[src_start..src_start + len]);
+            }
+        }
+
+        self.remote_size = Some((screen_width, screen_height));
+    }
+
+    fn upload_texture(&mut self, ctx: &egui::Context) {
+        let (width, height) = self.frame_size;
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        // BGRA -> RGBA swap
+        let mut rgba = self.frame_buffer.clone();
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+
+        let image = ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+        self.texture = Some(ctx.load_texture("frame", image, Default::default()));
     }
 }
 
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut needs_upload = false;
+
         while let Ok(msg) = self.receiver.try_recv() {
             match msg {
                 ServerMessage::ClipboardSync { text } => {
                     self.clipboard.set_text(&text).ok();
                     self.last_clipboard = text;
                 }
-                ServerMessage::VideoFrame { width, height, data } => {
-                    self.update_frame(ctx, width, height, &data);
+                ServerMessage::DeltaFrame { screen_width, screen_height, patches } => {
+                    self.apply_patches(screen_width, screen_height, patches);
+                    needs_upload = true;
                 }
                 _ => {}
             }
+        }
+
+        if needs_upload {
+            self.upload_texture(ctx);
         }
 
         if let Ok(text) = self.clipboard.get_text() {
@@ -122,22 +169,5 @@ impl eframe::App for Display {
         for msg in msgs {
             let _ = self.sender.send(msg);
         }
-    }
-}
-
-impl Display {
-    fn update_frame(&mut self, ctx: &egui::Context, width: u32, height: u32, data: &[u8]) {
-        let yuv = match self.decoder.decode(data) {
-            Ok(Some(yuv)) => yuv,
-            _ => return,
-        };
-
-        let (w, h) = yuv.dimensions();
-        let mut rgba = vec![0u8; w * h * 4];
-        yuv.write_rgba8(&mut rgba);
-
-        let image = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
-        self.remote_size = Some((width, height));
-        self.texture = Some(ctx.load_texture("frame", image, Default::default()));
     }
 }

@@ -6,6 +6,8 @@ use windows::Win32::Graphics::{
 use windows::Win32::Graphics::Direct3D::*;
 use anyhow::Result;
 use windows::core::Interface;
+use altreach_proto::FramePatch;
+use crate::encoder::compress;
 
 pub struct Capturer {
     device: ID3D11Device,
@@ -46,7 +48,31 @@ impl Capturer {
         }
     }
 
-    pub fn capture(&mut self) -> Result<Option<(u32, u32, Vec<u8>)>> {
+    /// Capture the full screen as a single patch — used for the initial frame on connect.
+    pub fn capture_full(&mut self) -> Result<Option<(u32, u32, Vec<FramePatch>)>> {
+        unsafe {
+            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource: Option<IDXGIResource> = None;
+
+            match self.duplication.AcquireNextFrame(500, &mut frame_info, &mut resource) {
+                Ok(_) => {}
+                Err(e) if e.code().0 as u32 == 0x887A0027 => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+
+            let gpu_texture: ID3D11Texture2D = resource.unwrap().cast()?;
+            let pixels = self.copy_texture(&gpu_texture)?;
+            self.duplication.ReleaseFrame()?;
+
+            let (width, height) = self.staging_size;
+            let data = compress(&pixels)?;
+            let patches = vec![FramePatch { x: 0, y: 0, width, height, data }];
+            Ok(Some((width, height, patches)))
+        }
+    }
+
+    /// Capture only dirty rectangles for incremental updates.
+    pub fn capture_frame(&mut self) -> Result<Option<(u32, u32, Vec<FramePatch>)>> {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
@@ -63,46 +89,103 @@ impl Capturer {
             }
 
             let gpu_texture: ID3D11Texture2D = resource.unwrap().cast()?;
+            let pixels = self.copy_texture(&gpu_texture)?;
+            let (width, height) = self.staging_size;
 
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            gpu_texture.GetDesc(&mut desc);
-            let width = desc.Width;
-            let height = desc.Height;
+            // Fetch dirty rects with a retry loop for DXGI_ERROR_MORE_DATA.
+            let mut rects: Vec<windows::Win32::Foundation::RECT> = vec![Default::default(); 16];
+            let dirty_rects = loop {
+                let mut bytes_needed: u32 = 0;
+                let result = self.duplication.GetFrameDirtyRects(
+                    (rects.len() * std::mem::size_of::<windows::Win32::Foundation::RECT>()) as u32,
+                    rects.as_mut_ptr(),
+                    &mut bytes_needed,
+                );
+                match result {
+                    Ok(()) => {
+                        let count = bytes_needed as usize / std::mem::size_of::<windows::Win32::Foundation::RECT>();
+                        rects.truncate(count);
+                        break rects;
+                    }
+                    Err(e) if e.code().0 as u32 == 0x887A0003 => {
+                        // DXGI_ERROR_MORE_DATA — resize and retry
+                        let count = bytes_needed as usize / std::mem::size_of::<windows::Win32::Foundation::RECT>();
+                        rects.resize(count, Default::default());
+                    }
+                    Err(e) => {
+                        self.duplication.ReleaseFrame()?;
+                        return Err(e.into());
+                    }
+                }
+            };
 
-            if self.staging.is_none() || self.staging_size != (width, height) {
-                desc.Usage = D3D11_USAGE_STAGING;
-                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-                desc.BindFlags = 0;
-                desc.MiscFlags = 0;
-                desc.MipLevels = 1;
-                desc.ArraySize = 1;
-                desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
-
-                let mut staging: Option<ID3D11Texture2D> = None;
-                self.device.CreateTexture2D(&desc, None, Some(&mut staging))?;
-                self.staging = staging;
-                self.staging_size = (width, height);
-            }
-
-            let staging = self.staging.as_ref().unwrap();
-            self.context.CopyResource(staging, &gpu_texture);
-
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            self.context.Map(&staging.cast::<ID3D11Resource>()?, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-
-            let row_pitch = mapped.RowPitch as usize;
-            let data = mapped.pData as *const u8;
-            let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-
-            for row in 0..height as usize {
-                let src = std::slice::from_raw_parts(data.add(row * row_pitch), width as usize * 4);
-                pixels.extend_from_slice(src);
-            }
-
-            self.context.Unmap(&staging.cast::<ID3D11Resource>()?, 0);
             self.duplication.ReleaseFrame()?;
 
-            Ok(Some((width, height, pixels)))
+            if dirty_rects.is_empty() {
+                return Ok(None);
+            }
+
+            let mut patches = Vec::with_capacity(dirty_rects.len());
+            for rect in &dirty_rects {
+                let x = rect.left as u32;
+                let y = rect.top as u32;
+                let w = (rect.right - rect.left) as u32;
+                let h = (rect.bottom - rect.top) as u32;
+
+                if w == 0 || h == 0 {
+                    continue;
+                }
+
+                let mut patch_pixels = Vec::with_capacity((w * h * 4) as usize);
+                for row in 0..h {
+                    let row_start = ((y + row) * width + x) as usize * 4;
+                    patch_pixels.extend_from_slice(&pixels[row_start..row_start + w as usize * 4]);
+                }
+
+                patches.push(FramePatch { x, y, width: w, height: h, data: compress(&patch_pixels)? });
+            }
+
+            Ok(Some((width, height, patches)))
         }
+    }
+
+    unsafe fn copy_texture(&mut self, gpu_texture: &ID3D11Texture2D) -> Result<Vec<u8>> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        gpu_texture.GetDesc(&mut desc);
+        let width = desc.Width;
+        let height = desc.Height;
+
+        if self.staging.is_none() || self.staging_size != (width, height) {
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            desc.BindFlags = 0;
+            desc.MiscFlags = 0;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+
+            let mut staging: Option<ID3D11Texture2D> = None;
+            self.device.CreateTexture2D(&desc, None, Some(&mut staging))?;
+            self.staging = staging;
+            self.staging_size = (width, height);
+        }
+
+        let staging = self.staging.as_ref().unwrap();
+        self.context.CopyResource(staging, gpu_texture);
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        self.context.Map(&staging.cast::<ID3D11Resource>()?, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+
+        let row_pitch = mapped.RowPitch as usize;
+        let data = mapped.pData as *const u8;
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+
+        for row in 0..height as usize {
+            let src = std::slice::from_raw_parts(data.add(row * row_pitch), width as usize * 4);
+            pixels.extend_from_slice(src);
+        }
+
+        self.context.Unmap(&staging.cast::<ID3D11Resource>()?, 0);
+        Ok(pixels)
     }
 }

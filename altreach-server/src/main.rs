@@ -13,6 +13,7 @@ async fn main() -> Result<()> {
     info!("altreach-server starting...");
     dotenvy::dotenv().ok();
     let addr = std::env::var("BIND_ADDR").expect("BIND_ADDR is not set");
-    server::run(&addr).await?;
+    let password = std::env::var("PASSWORD").expect("PASSWORD is not set");
+    server::run(&addr, password).await?;
     Ok(())
 }
