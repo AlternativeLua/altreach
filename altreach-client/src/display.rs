@@ -1,6 +1,6 @@
 use std::sync::mpsc::{Receiver, Sender};
 use egui::{ColorImage, TextureHandle};
-use altreach_proto::{ClientMessage, ServerMessage};
+use altreach_proto::{ClientMessage, FramePatch, ServerMessage};
 use crate::input::egui_key_to_vk;
 
 pub struct Display {
@@ -10,6 +10,8 @@ pub struct Display {
     remote_size: Option<(u32, u32)>,
     clipboard: arboard::Clipboard,
     last_clipboard: String,
+    frame_buffer: Vec<u8>,
+    frame_size: (u32, u32),
 }
 
 impl Display {
@@ -21,6 +23,8 @@ impl Display {
             remote_size: None,
             clipboard: arboard::Clipboard::new().expect("Failed to init clipboard"),
             last_clipboard: String::new(),
+            frame_buffer: Vec::new(),
+            frame_size: (0, 0),
         }
     }
 }
@@ -38,8 +42,8 @@ impl eframe::App for Display {
                 _ => latest_frame = Some(msg),
             }
         }
-        if let Some(ServerMessage::Frame { width, height, data }) = latest_frame {
-            self.update_frame(ctx, width, height, data);
+        if let Some(ServerMessage::DeltaFrame { screen_width, screen_height, patches }) = latest_frame {
+            self.update_frame(ctx, screen_width, screen_height, patches);
         }
 
         // Poll local clipboard and send to server if it changed.
@@ -128,17 +132,37 @@ impl eframe::App for Display {
 }
 
 impl Display {
-    fn update_frame(&mut self, ctx: &egui::Context, width: u32, height: u32, data: Vec<u8>) {
-        let data = lz4_flex::decompress_size_prepended(&data).unwrap();
-        let mut rgba = data;
-        for pixel in rgba.chunks_exact_mut(4) {
+    fn update_frame(&mut self, ctx: &egui::Context, width: u32, height: u32, patches: Vec<FramePatch>) {
+        if self.frame_size != (width, height) {
+            self.frame_buffer = vec![0u8; (width * height * 4) as usize];
+            self.frame_size = (width, height);
+        }
+
+        for patch in patches {
+            let pixels = lz4_flex::decompress_size_prepended(&patch.data).unwrap();
+            for row in 0..patch.height as usize {
+                let src_start = row * patch.width as usize * 4;
+                let src_end = src_start + patch.width as usize * 4;
+                let dst_start = (patch.y as usize + row) * width as usize * 4 + patch.x as usize * 4;
+                let dst_end = dst_start + patch.width as usize * 4;
+                self.frame_buffer[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
+            }
+        }
+
+        // BGRA -> RGBA swap
+        for pixel in self.frame_buffer.chunks_exact_mut(4) {
             pixel.swap(0, 2);
         }
 
         let image = ColorImage::from_rgba_unmultiplied(
             [width as usize, height as usize],
-            &rgba,
+            &self.frame_buffer,
         );
+
+        // Swap back so the buffer stays in BGRA for future patches
+        for pixel in self.frame_buffer.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
 
         self.remote_size = Some((width, height));
         self.texture = Some(ctx.load_texture("frame", image, Default::default()));

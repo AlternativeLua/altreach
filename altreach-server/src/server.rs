@@ -70,9 +70,8 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
             let result = tokio::task::spawn_blocking(move || {
                 cap.lock().unwrap().capture_frame()
             }).await??;
-            if let Some((width, height, bytes)) = result {
-                let data = compress(&bytes)?;
-                let encoded = encode(&ServerMessage::Frame { width, height, data })?;
+            if let Some((screen_width, screen_height, patches)) = result {
+                let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches })?;
                 writer.write_all(&encoded).await?;
             }
         }
