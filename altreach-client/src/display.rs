@@ -55,7 +55,6 @@ impl eframe::App for Display {
             }
         }
 
-        let mut copy_triggered = false;
         ctx.input(|i| {
             if let Some(pos) = i.pointer.latest_pos() {
                 let nx = (pos.x / screen_rect.width()).clamp(0.0, 1.0) * 65535.0;
@@ -94,23 +93,10 @@ impl eframe::App for Display {
                             delta_y: delta.y as i32,
                         });
                     }
-                    egui::Event::Copy | egui::Event::Cut => {
-                        copy_triggered = true;
-                    }
-                    egui::Event::Paste(text) => {
-                        msgs.push(ClientMessage::ClipboardSync { text: text.clone() });
-                    }
                     _ => {}
                 }
             }
         });
-
-        if copy_triggered {
-            let text = ctx.output(|o| o.copied_text.clone());
-            if !text.is_empty() {
-                msgs.push(ClientMessage::ClipboardSync { text });
-            }
-        }
 
         for msg in msgs {
             let _ = self.sender.send(msg);
