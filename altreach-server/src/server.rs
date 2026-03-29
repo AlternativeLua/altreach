@@ -67,12 +67,14 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
         tokio::select! {
         _ = frame_ticker.tick() => {
             let cap = capturer.clone();
-            let (width, height, bytes) = tokio::task::spawn_blocking(move || {
+            let result = tokio::task::spawn_blocking(move || {
                 cap.lock().unwrap().capture_frame()
             }).await??;
-            let data = compress(&bytes)?;
-            let encoded = encode(&ServerMessage::Frame { width, height, data })?;
-            writer.write_all(&encoded).await?;
+            if let Some((width, height, bytes)) = result {
+                let data = compress(&bytes)?;
+                let encoded = encode(&ServerMessage::Frame { width, height, data })?;
+                writer.write_all(&encoded).await?;
+            }
         }
         _ = clipboard_ticker.tick() => {
             if let Some(text) = clipboard::get_clipboard() {

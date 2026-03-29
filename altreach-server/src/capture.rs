@@ -46,11 +46,15 @@ impl Capturer {
         }
     }
 
-    pub fn capture_frame(&mut self) -> Result<(u32, u32, Vec<u8>)> {
+    pub fn capture_frame(&mut self) -> Result<Option<(u32, u32, Vec<u8>)>> {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
             self.duplication.AcquireNextFrame(500, &mut frame_info, &mut resource)?;
+            if frame_info.AccumulatedFrames == 0 {
+                self.duplication.ReleaseFrame()?;
+                return Ok(None);
+            }
             let gpu_texture: ID3D11Texture2D = resource.unwrap().cast()?;
 
             let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -93,7 +97,7 @@ impl Capturer {
             self.context.Unmap(&staging.cast::<ID3D11Resource>()?, 0);
             self.duplication.ReleaseFrame()?;
 
-            Ok((width, height, pixels))
+            Ok(Some((width, height, pixels)))
         }
     }
 }
