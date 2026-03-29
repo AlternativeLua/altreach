@@ -2,6 +2,7 @@ mod capture;
 mod encoder;
 mod input;
 mod server;
+mod clipboard;
 
 use anyhow::Result;
 use tracing::info;

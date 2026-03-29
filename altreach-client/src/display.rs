@@ -18,13 +18,16 @@ impl Display {
 
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain the channel but only render the latest frame.
-        // The server sends faster than we can render, so we skip stale frames.
-        let mut latest = None;
+        let mut latest_frame = None;
         while let Ok(msg) = self.receiver.try_recv() {
-            latest = Some(msg);
+            match msg {
+                ServerMessage::ClipboardSync { text } => {
+                    ctx.output_mut(|o| o.copied_text = text);
+                }
+                _ => latest_frame = Some(msg),
+            }
         }
-        if let Some(ServerMessage::Frame { width, height, data }) = latest {
+        if let Some(ServerMessage::Frame { width, height, data }) = latest_frame {
             self.update_frame(ctx, width, height, data);
         }
 
@@ -91,7 +94,17 @@ impl eframe::App for Display {
                             delta_y: delta.y as i32,
                         });
                     }
-                    
+
+                    egui::Event::Copy | egui::Event::Cut => {
+                        msgs.push(ClientMessage::ClipboardSync {
+                            text: ctx.output(|o| o.copied_text.clone()),
+                        })
+                    }
+
+                    egui::Event::Paste(text) => {
+                        msgs.push(ClientMessage::ClipboardSync { text: text.clone() });
+                    }
+
                     _ => {}
                 }
             }

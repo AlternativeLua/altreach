@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7,7 +8,7 @@ use tracing::{info, warn, error};
 use altreach_proto::*;
 use crate::capture::Capturer;
 use crate::encoder::compress;
-use crate::input;
+use crate::{clipboard, input};
 
 pub async fn run(addr: &str) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -58,7 +59,8 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
     info!("Client {peer} authenticated");
 
     let capturer = std::sync::Arc::new(std::sync::Mutex::new(Capturer::new()?));
-    let frame_interval = tokio::time::Duration::from_millis(33); // ~30fps
+    let frame_interval = Duration::from_millis(33); // ~30fps
+    let mut last_clipboard = String::new();
 
     loop {
         tokio::select! {
@@ -71,6 +73,15 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
             let encoded = encode(&ServerMessage::Frame { width, height, data })?;
             writer.write_all(&encoded).await?;
         }
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
+            if let Some(text) = clipboard::get_clipboard() {
+                if text != last_clipboard {
+                    last_clipboard = text.clone();
+                    let encoded = encode(&ServerMessage::ClipboardSync { text })?;
+                    writer.write_all(&encoded).await?;
+                }
+            }
+        }
         msg = read_message(&mut reader, &mut buf) => {
             match msg? {
                 ClientMessage::MouseMove { x, y } => input::inject_mouse_move(x, y)?,
@@ -78,6 +89,7 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
                 ClientMessage::KeyEvent { vk_code, pressed } => input::inject_key(vk_code, pressed)?,
                 ClientMessage::MouseScroll { delta_x, delta_y } => input::inject_mouse_scroll(delta_x, delta_y)?,
                 ClientMessage::Disconnect { .. } => break Ok(()),
+                ClientMessage::ClipboardSync { text } => clipboard::set_clipboard(&text)?,
                 _ => {}
             }
         }

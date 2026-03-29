@@ -9,6 +9,7 @@ pub enum ClientMessage {
     KeyEvent { vk_code: u16, pressed: bool },
     Ping,
     Disconnect { reason: String },
+    ClipboardSync { text: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -17,6 +18,7 @@ pub enum ServerMessage {
     Frame { width: u32, height: u32, data: Vec<u8> },
     Pong,
     Disconnect { reason: String },
+    ClipboardSync { text: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
