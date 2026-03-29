@@ -48,6 +48,61 @@ impl Capturer {
         }
     }
 
+    pub fn capture_full(&mut self) -> Result<Option<(u32, u32, Vec<FramePatch>)>> {
+        unsafe {
+            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource: Option<IDXGIResource> = None;
+            self.duplication.AcquireNextFrame(500, &mut frame_info, &mut resource)?;
+
+            let gpu_texture: ID3D11Texture2D = resource.unwrap().cast()?;
+
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            gpu_texture.GetDesc(&mut desc);
+            let width = desc.Width;
+            let height = desc.Height;
+
+            if self.staging.is_none() || self.staging_size != (width, height) {
+                desc.Usage = D3D11_USAGE_STAGING;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                desc.BindFlags = 0;
+                desc.MiscFlags = 0;
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+
+                let mut staging: Option<ID3D11Texture2D> = None;
+                self.device.CreateTexture2D(&desc, None, Some(&mut staging))?;
+                self.staging = staging;
+                self.staging_size = (width, height);
+            }
+
+            let staging = self.staging.as_ref().unwrap();
+            self.context.CopyResource(staging, &gpu_texture);
+
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context.Map(&staging.cast::<ID3D11Resource>()?, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+
+            let row_pitch = mapped.RowPitch as usize;
+            let data = mapped.pData as *const u8;
+            let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+
+            for row in 0..height as usize {
+                let src = std::slice::from_raw_parts(data.add(row * row_pitch), width as usize * 4);
+                pixels.extend_from_slice(src);
+            }
+
+            self.context.Unmap(&staging.cast::<ID3D11Resource>()?, 0);
+            self.duplication.ReleaseFrame()?;
+
+            let patch = FramePatch {
+                x: 0, y: 0, width, height,
+                data: lz4_flex::compress_prepend_size(&pixels),
+            };
+
+            Ok(Some((width, height, vec![patch])))
+        }
+    }
+
     pub fn capture_frame(&mut self) -> Result<Option<(u32, u32, Vec<FramePatch>)>> {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -60,10 +115,25 @@ impl Capturer {
             }
 
             let mut size_needed: u32 = 0;
-            let _ = self.duplication.GetFrameDirtyRects(0, std::ptr::null_mut(), &mut size_needed);
-            let count = size_needed as usize / std::mem::size_of::<RECT>();
-            let mut rects = vec![RECT::default(); count];
-            self.duplication.GetFrameDirtyRects(size_needed, rects.as_mut_ptr(), &mut size_needed)?;
+            let mut rects: Vec<RECT> = Vec::new();
+            loop {
+                let result = self.duplication.GetFrameDirtyRects(
+                    (rects.len() * std::mem::size_of::<RECT>()) as u32,
+                    rects.as_mut_ptr(),
+                    &mut size_needed,
+                );
+                match result {
+                    Ok(_) => break,
+                    Err(e) if e.code().0 as u32 == 0x887A0003 => {
+                        let count = size_needed as usize / std::mem::size_of::<RECT>();
+                        rects.resize(count, RECT::default());
+                    }
+                    Err(e) => {
+                        self.duplication.ReleaseFrame()?;
+                        return Err(e.into());
+                    }
+                }
+            }
 
             if rects.is_empty() {
                 self.duplication.ReleaseFrame()?;

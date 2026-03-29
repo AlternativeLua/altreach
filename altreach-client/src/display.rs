@@ -32,18 +32,17 @@ impl Display {
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle incoming server messages.
-        let mut latest_frame = None;
         while let Ok(msg) = self.receiver.try_recv() {
             match msg {
                 ServerMessage::ClipboardSync { text } => {
                     self.clipboard.set_text(&text).ok();
                     self.last_clipboard = text;
                 }
-                _ => latest_frame = Some(msg),
+                ServerMessage::DeltaFrame { screen_width, screen_height, patches } => {
+                    self.update_frame(ctx, screen_width, screen_height, patches);
+                }
+                _ => {}
             }
-        }
-        if let Some(ServerMessage::DeltaFrame { screen_width, screen_height, patches }) = latest_frame {
-            self.update_frame(ctx, screen_width, screen_height, patches);
         }
 
         // Poll local clipboard and send to server if it changed.

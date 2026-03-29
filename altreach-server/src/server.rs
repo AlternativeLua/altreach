@@ -7,7 +7,6 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::{info, warn, error};
 use altreach_proto::*;
 use crate::capture::Capturer;
-use crate::encoder::compress;
 use crate::{clipboard, input};
 
 pub async fn run(addr: &str) -> Result<()> {
@@ -59,6 +58,16 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
     info!("Client {peer} authenticated");
 
     let capturer = std::sync::Arc::new(std::sync::Mutex::new(Capturer::new()?));
+
+    {
+        let cap = capturer.clone();
+        if let Some((screen_width, screen_height, pixels)) = tokio::task::spawn_blocking(move || {
+            cap.lock().unwrap().capture_full()
+        }).await?? {
+            let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches: pixels })?;
+            writer.write_all(&encoded).await?;
+        }
+    }
     let mut frame_ticker = tokio::time::interval(Duration::from_millis(33));
     let mut clipboard_ticker = tokio::time::interval(Duration::from_secs(1));
     let mut last_clipboard = String::new();
