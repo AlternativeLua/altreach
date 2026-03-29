@@ -15,15 +15,10 @@ pub enum ClientMessage {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ServerMessage {
     AuthResult { success: bool, reason: Option<String> },
-    Frame { width: u32, height: u32, data: Vec<u8> },
+    VideoFrame { width: u32, height: u32, data: Vec<u8> },
     Pong,
     Disconnect { reason: String },
     ClipboardSync { text: String },
-    DeltaFrame {
-        screen_width: u32,
-        screen_height: u32,
-        patches: Vec<FramePatch>,
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -31,15 +26,6 @@ pub enum MouseButton {
     Left,
     Right,
     Middle,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FramePatch {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-    pub data: Vec<u8>, // lz4 compressed BGRA for this region only
 }
 
 // Wire format: [u32 length (4 bytes, little-endian)][bincode payload]
@@ -67,6 +53,6 @@ pub fn decode<T: for<'de> Deserialize<'de>>(
     Ok(Some((msg, 4 + len)))
 }
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 // Hard coded for now :3
 pub const PASSWORD: &str = "test";

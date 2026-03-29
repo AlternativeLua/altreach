@@ -1,6 +1,8 @@
 use std::sync::mpsc::{Receiver, Sender};
 use egui::{ColorImage, TextureHandle};
-use altreach_proto::{ClientMessage, FramePatch, ServerMessage};
+use altreach_proto::{ClientMessage, ServerMessage};
+use openh264::decoder::Decoder;
+use openh264::formats::YUVSource;
 use crate::input::egui_key_to_vk;
 
 pub struct Display {
@@ -10,8 +12,7 @@ pub struct Display {
     remote_size: Option<(u32, u32)>,
     clipboard: arboard::Clipboard,
     last_clipboard: String,
-    frame_buffer: Vec<u8>,
-    frame_size: (u32, u32),
+    decoder: Decoder,
 }
 
 impl Display {
@@ -23,34 +24,26 @@ impl Display {
             remote_size: None,
             clipboard: arboard::Clipboard::new().expect("Failed to init clipboard"),
             last_clipboard: String::new(),
-            frame_buffer: Vec::new(),
-            frame_size: (0, 0),
+            decoder: Decoder::new().expect("Failed to init H264 decoder"),
         }
     }
 }
 
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Handle incoming server messages.
-        let mut needs_upload = false;
         while let Ok(msg) = self.receiver.try_recv() {
             match msg {
                 ServerMessage::ClipboardSync { text } => {
                     self.clipboard.set_text(&text).ok();
                     self.last_clipboard = text;
                 }
-                ServerMessage::DeltaFrame { screen_width, screen_height, patches } => {
-                    self.apply_patches(screen_width, screen_height, patches);
-                    needs_upload = true;
+                ServerMessage::VideoFrame { width, height, data } => {
+                    self.update_frame(ctx, width, height, &data);
                 }
                 _ => {}
             }
         }
-        if needs_upload {
-            self.upload_texture(ctx);
-        }
 
-        // Poll local clipboard and send to server if it changed.
         if let Ok(text) = self.clipboard.get_text() {
             if text != self.last_clipboard {
                 self.last_clipboard = text.clone();
@@ -70,7 +63,6 @@ impl eframe::App for Display {
         ctx.request_repaint();
 
         let mut msgs = Vec::new();
-        let mut current_pos = (0i32, 0i32);
         let screen_rect = ctx.screen_rect();
 
         if let Some((rw, rh)) = self.remote_size {
@@ -86,8 +78,7 @@ impl eframe::App for Display {
             if let Some(pos) = i.pointer.latest_pos() {
                 let nx = (pos.x / screen_rect.width()).clamp(0.0, 1.0) * 65535.0;
                 let ny = (pos.y / screen_rect.height()).clamp(0.0, 1.0) * 65535.0;
-                current_pos = (nx as i32, ny as i32);
-                msgs.push(ClientMessage::MouseMove { x: current_pos.0, y: current_pos.1 });
+                msgs.push(ClientMessage::MouseMove { x: nx as i32, y: ny as i32 });
             }
 
             for event in &i.events {
@@ -109,7 +100,6 @@ impl eframe::App for Display {
                         });
                     }
                     egui::Event::Key { key, pressed, modifiers, .. } => {
-                        // Translate Mac Cmd key to Windows Ctrl key.
                         if modifiers.mac_cmd {
                             msgs.push(ClientMessage::KeyEvent { vk_code: 0x11, pressed: *pressed });
                         }
@@ -136,47 +126,18 @@ impl eframe::App for Display {
 }
 
 impl Display {
-    fn apply_patches(&mut self, width: u32, height: u32, patches: Vec<FramePatch>) {
-        if self.frame_size != (width, height) {
-            self.frame_buffer = vec![0u8; (width * height * 4) as usize];
-            self.frame_size = (width, height);
-        }
+    fn update_frame(&mut self, ctx: &egui::Context, width: u32, height: u32, data: &[u8]) {
+        let yuv = match self.decoder.decode(data) {
+            Ok(Some(yuv)) => yuv,
+            _ => return,
+        };
 
-        for patch in patches {
-            let pixels = lz4_flex::decompress_size_prepended(&patch.data).unwrap();
-            for row in 0..patch.height as usize {
-                let src_start = row * patch.width as usize * 4;
-                let src_end = src_start + patch.width as usize * 4;
-                let dst_start = (patch.y as usize + row) * width as usize * 4 + patch.x as usize * 4;
-                let dst_end = dst_start + patch.width as usize * 4;
-                self.frame_buffer[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
-            }
-        }
+        let (w, h) = yuv.dimensions();
+        let mut rgba = vec![0u8; w * h * 4];
+        yuv.write_rgba8(&mut rgba);
 
+        let image = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
         self.remote_size = Some((width, height));
-    }
-
-    fn upload_texture(&mut self, ctx: &egui::Context) {
-        let (width, height) = self.frame_size;
-        if width == 0 || height == 0 {
-            return;
-        }
-
-        // BGRA -> RGBA swap
-        for pixel in self.frame_buffer.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
-
-        let image = ColorImage::from_rgba_unmultiplied(
-            [width as usize, height as usize],
-            &self.frame_buffer,
-        );
-
-        // Swap back so the buffer stays in BGRA for future patches
-        for pixel in self.frame_buffer.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
-
         self.texture = Some(ctx.load_texture("frame", image, Default::default()));
     }
 }

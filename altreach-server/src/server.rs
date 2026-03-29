@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use anyhow::Result;
@@ -7,6 +8,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tracing::{info, warn, error};
 use altreach_proto::*;
 use crate::capture::Capturer;
+use crate::encoder::H264Encoder;
 use crate::{clipboard, input};
 
 pub async fn run(addr: &str) -> Result<()> {
@@ -38,7 +40,6 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
     let (mut reader, writer) = stream.into_split();
     let mut buf = Vec::new();
 
-    // Auth loop — keep reading until we get a Handshake.
     let mut writer = loop {
         if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
             buf.drain(..consumed);
@@ -57,59 +58,53 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
 
     info!("Client {peer} authenticated");
 
-    let capturer = std::sync::Arc::new(std::sync::Mutex::new(Capturer::new()?));
-
-    {
-        let cap = capturer.clone();
-        match tokio::task::spawn_blocking(move || cap.lock().unwrap().capture_full()).await? {
-            Ok(Some((screen_width, screen_height, pixels))) => {
-                info!("Sending initial frame {screen_width}x{screen_height} with {} patches", pixels.len());
-                let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches: pixels })?;
-                writer.write_all(&encoded).await?;
-            }
-            Ok(None) => info!("Initial capture returned None"),
-            Err(e) => warn!("Initial capture failed, client will see first delta: {e}"),
-        }
-    }
+    let capturer = Arc::new(Mutex::new(Capturer::new()?));
+    let encoder = Arc::new(Mutex::new(H264Encoder::new()));
     let mut frame_ticker = tokio::time::interval(Duration::from_millis(33));
     let mut clipboard_ticker = tokio::time::interval(Duration::from_secs(1));
     let mut last_clipboard = String::new();
 
     loop {
         tokio::select! {
-        _ = frame_ticker.tick() => {
-            let cap = capturer.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                cap.lock().unwrap().capture_frame()
-            }).await??;
-            if let Some((screen_width, screen_height, patches)) = result {
-                let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches })?;
-                writer.write_all(&encoded).await?;
-            }
-        }
-        _ = clipboard_ticker.tick() => {
-            if let Some(text) = clipboard::get_clipboard() {
-                if text != last_clipboard {
-                    last_clipboard = text.clone();
-                    let encoded = encode(&ServerMessage::ClipboardSync { text })?;
+            _ = frame_ticker.tick() => {
+                let cap = capturer.clone();
+                let enc = encoder.clone();
+                let result = tokio::task::spawn_blocking(move || -> Result<Option<(u32, u32, Vec<u8>)>> {
+                    if let Some((width, height, bgra)) = cap.lock().unwrap().capture()? {
+                        let data = enc.lock().unwrap().encode(&bgra, width, height)?;
+                        Ok(data.map(|d| (width, height, d)))
+                    } else {
+                        Ok(None)
+                    }
+                }).await??;
+
+                if let Some((width, height, data)) = result {
+                    let encoded = encode(&ServerMessage::VideoFrame { width, height, data })?;
                     writer.write_all(&encoded).await?;
                 }
             }
-        }
-        msg = read_message(&mut reader, &mut buf) => {
-            match msg? {
-                ClientMessage::MouseMove { x, y } => input::inject_mouse_move(x, y)?,
-                ClientMessage::MouseButton { button, pressed, .. } => input::inject_mouse_button(&button, pressed)?,
-                ClientMessage::KeyEvent { vk_code, pressed } => input::inject_key(vk_code, pressed)?,
-                ClientMessage::MouseScroll { delta_x, delta_y } => input::inject_mouse_scroll(delta_x, delta_y)?,
-                ClientMessage::Disconnect { .. } => break Ok(()),
-                ClientMessage::ClipboardSync { text } => clipboard::set_clipboard(&text)?,
-                _ => {}
+            _ = clipboard_ticker.tick() => {
+                if let Some(text) = clipboard::get_clipboard() {
+                    if text != last_clipboard {
+                        last_clipboard = text.clone();
+                        let encoded = encode(&ServerMessage::ClipboardSync { text })?;
+                        writer.write_all(&encoded).await?;
+                    }
+                }
+            }
+            msg = read_message(&mut reader, &mut buf) => {
+                match msg? {
+                    ClientMessage::MouseMove { x, y } => input::inject_mouse_move(x, y)?,
+                    ClientMessage::MouseButton { button, pressed, .. } => input::inject_mouse_button(&button, pressed)?,
+                    ClientMessage::KeyEvent { vk_code, pressed } => input::inject_key(vk_code, pressed)?,
+                    ClientMessage::MouseScroll { delta_x, delta_y } => input::inject_mouse_scroll(delta_x, delta_y)?,
+                    ClientMessage::Disconnect { .. } => break Ok(()),
+                    ClientMessage::ClipboardSync { text } => clipboard::set_clipboard(&text)?,
+                    _ => {}
+                }
             }
         }
     }
-    }
-
 }
 
 async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Result<OwnedWriteHalf> {
@@ -122,19 +117,15 @@ async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Resul
                 };
                 let bytes = encode(&error_message)?;
                 writer.write_all(&bytes).await?;
-
                 Err(anyhow::anyhow!("Wrong version"))
-            } else if password == PASSWORD
-            {
+            } else if password == PASSWORD {
                 let response_message = ServerMessage::AuthResult {
                     success: true,
-                    reason: None
+                    reason: None,
                 };
                 let bytes = encode(&response_message)?;
-
                 writer.write_all(&bytes).await?;
-
-                Ok((writer))
+                Ok(writer)
             } else {
                 let error_message = ServerMessage::AuthResult {
                     success: false,
@@ -142,12 +133,10 @@ async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf) -> Resul
                 };
                 let bytes = encode(&error_message)?;
                 writer.write_all(&bytes).await?;
-
                 Err(anyhow::anyhow!("Wrong password"))
             }
-            
         }
-        _ => Ok((writer))
+        _ => Ok(writer)
     }
 }
 
