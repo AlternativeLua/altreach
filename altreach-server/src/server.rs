@@ -61,11 +61,14 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr) -> Result<()> {
 
     {
         let cap = capturer.clone();
-        if let Some((screen_width, screen_height, pixels)) = tokio::task::spawn_blocking(move || {
-            cap.lock().unwrap().capture_full()
-        }).await?? {
-            let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches: pixels })?;
-            writer.write_all(&encoded).await?;
+        match tokio::task::spawn_blocking(move || cap.lock().unwrap().capture_full()).await? {
+            Ok(Some((screen_width, screen_height, pixels))) => {
+                info!("Sending initial frame {screen_width}x{screen_height} with {} patches", pixels.len());
+                let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches: pixels })?;
+                writer.write_all(&encoded).await?;
+            }
+            Ok(None) => info!("Initial capture returned None"),
+            Err(e) => warn!("Initial capture failed, client will see first delta: {e}"),
         }
     }
     let mut frame_ticker = tokio::time::interval(Duration::from_millis(33));

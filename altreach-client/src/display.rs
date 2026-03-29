@@ -32,6 +32,7 @@ impl Display {
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle incoming server messages.
+        let mut needs_upload = false;
         while let Ok(msg) = self.receiver.try_recv() {
             match msg {
                 ServerMessage::ClipboardSync { text } => {
@@ -39,10 +40,14 @@ impl eframe::App for Display {
                     self.last_clipboard = text;
                 }
                 ServerMessage::DeltaFrame { screen_width, screen_height, patches } => {
-                    self.update_frame(ctx, screen_width, screen_height, patches);
+                    self.apply_patches(screen_width, screen_height, patches);
+                    needs_upload = true;
                 }
                 _ => {}
             }
+        }
+        if needs_upload {
+            self.upload_texture(ctx);
         }
 
         // Poll local clipboard and send to server if it changed.
@@ -131,7 +136,7 @@ impl eframe::App for Display {
 }
 
 impl Display {
-    fn update_frame(&mut self, ctx: &egui::Context, width: u32, height: u32, patches: Vec<FramePatch>) {
+    fn apply_patches(&mut self, width: u32, height: u32, patches: Vec<FramePatch>) {
         if self.frame_size != (width, height) {
             self.frame_buffer = vec![0u8; (width * height * 4) as usize];
             self.frame_size = (width, height);
@@ -146,6 +151,15 @@ impl Display {
                 let dst_end = dst_start + patch.width as usize * 4;
                 self.frame_buffer[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
             }
+        }
+
+        self.remote_size = Some((width, height));
+    }
+
+    fn upload_texture(&mut self, ctx: &egui::Context) {
+        let (width, height) = self.frame_size;
+        if width == 0 || height == 0 {
+            return;
         }
 
         // BGRA -> RGBA swap
@@ -163,7 +177,6 @@ impl Display {
             pixel.swap(0, 2);
         }
 
-        self.remote_size = Some((width, height));
         self.texture = Some(ctx.load_texture("frame", image, Default::default()));
     }
 }
