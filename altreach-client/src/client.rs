@@ -11,6 +11,7 @@ pub struct Connection {
 impl Connection {
     pub async fn connect(addr: &str) -> Result<Self> {
         let stream = TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
         Ok(Self { stream, buf: vec![] })
     }
 

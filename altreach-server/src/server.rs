@@ -24,6 +24,7 @@ pub async fn run(addr: &str, password: String) -> Result<()> {
         };
 
         info!("Client connected: {peer}");
+        stream.set_nodelay(true).ok();
 
         let password = password.clone();
         tokio::spawn(async move {
