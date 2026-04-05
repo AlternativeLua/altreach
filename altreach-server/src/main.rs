@@ -9,6 +9,7 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider().install_default().expect("Failed to install crypto provider");
     tracing_subscriber::fmt::init();
     info!("altreach-server starting...");
     dotenvy::dotenv().ok();

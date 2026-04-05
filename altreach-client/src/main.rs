@@ -9,6 +9,7 @@ use altreach_proto::{ClientMessage, ServerMessage, PROTOCOL_VERSION};
 use display::Display;
 
 fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider().install_default().expect("Failed to install crypto provider");
     tracing_subscriber::fmt::init();
     dotenvy::dotenv().ok();
 
