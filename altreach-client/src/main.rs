@@ -26,7 +26,7 @@ fn main() -> Result<()> {
                 Err(e) => { tracing::error!("Failed to connect: {e}"); return; }
             };
 
-            if let Err(e) = conn.send(&ClientMessage::Handshake {
+            if let Err(e) = conn.sender.send(&ClientMessage::Handshake {
                 version: PROTOCOL_VERSION,
                 password,
             }).await {
@@ -36,17 +36,35 @@ fn main() -> Result<()> {
 
             info!("Handshake sent");
 
-            loop {
-                while let Ok(msg) = input_rx.try_recv() {
-                    if let Err(e) = conn.send(&msg).await {
-                        tracing::error!("Failed to send input: {e}");
-                        return;
-                    }
+            match conn.control_recv.recv_control().await {
+                Ok(ServerMessage::AuthResult { success: true, .. }) => info!("Authenticated"),
+                Ok(ServerMessage::AuthResult { success: false, reason }) => {
+                    tracing::error!("Auth failed: {:?}", reason);
+                    return;
                 }
+                Err(e) => { tracing::error!("Auth error: {e}"); return; }
+                _ => {}
+            }
 
-                match conn.recv().await {
-                    Ok(msg) => { let _ = frame_tx.send(msg); }
-                    Err(e) => { tracing::error!("Disconnected: {e}"); break; }
+            loop {
+                tokio::select! {
+                    msg = conn.frame_recv.recv_frame() => {
+                        match msg {
+                            Ok(m) => { let _ = frame_tx.send(m); }
+                            Err(e) => { tracing::error!("Disconnected: {e}"); break; }
+                        }
+                    }
+                    msg = conn.control_recv.recv_control() => {
+                        match msg {
+                            Ok(m) => { let _ = frame_tx.send(m); }
+                            Err(e) => { tracing::error!("Control error: {e}"); break; }
+                        }
+                    }
+                    Ok(msg) = async { input_rx.try_recv() } => {
+                        if let Err(e) = conn.sender.send(&msg).await {
+                            tracing::error!("Failed to send input: {e}"); break;
+                        }
+                    }
                 }
             }
         });

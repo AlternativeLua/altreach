@@ -1,60 +1,72 @@
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
 use anyhow::Result;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use quinn::{Endpoint, ServerConfig, Connection};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing::{info, warn, error};
 use altreach_proto::*;
 use crate::capture::Capturer;
 use crate::{clipboard, input};
 
 pub async fn run(addr: &str, password: String) -> Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+    let cert = rcgen::generate_simple_self_signed(vec!["altreach".to_string()])?;
+    let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+    let key_der = PrivateKeyDer::try_from(cert.key_pair.serialize_der())
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let server_crypto = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)?;
+
+    let server_config = ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?
+    ));
+
+    let endpoint = Endpoint::server(server_config, addr.parse()?)?;
     info!("Listening on {addr}");
 
-    loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(e) => {
-                error!("Failed to accept connection: {e}");
-                continue;
-            }
-        };
-
-        info!("Client connected: {peer}");
-        stream.set_nodelay(true).ok();
-
+    while let Some(incoming) = endpoint.accept().await {
         let password = password.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, peer, password).await {
-                warn!("Client {peer} disconnected with error: {e}");
-            } else {
-                info!("Client {peer} disconnected cleanly");
+            match incoming.await {
+                Ok(conn) => {
+                    let peer = conn.remote_address();
+                    info!("Client connected: {peer}");
+                    if let Err(e) = handle_client(conn, password).await {
+                        warn!("Client {peer} disconnected with error: {e}");
+                    } else {
+                        info!("Client {peer} disconnected cleanly");
+                    }
+                }
+                Err(e) => error!("Incoming connection failed: {e}"),
             }
         });
     }
+    Ok(())
 }
 
-async fn handle_client(stream: TcpStream, peer: SocketAddr, password: String) -> Result<()> {
-    let (mut reader, writer) = stream.into_split();
+async fn handle_client(conn: Connection, password: String) -> Result<()> {
+    let (control_send, mut control_recv) = conn.accept_bi().await?;
+    let mut frame_send = conn.open_uni().await?;
     let mut buf = Vec::new();
+    let peer = conn.remote_address();
 
-    let mut writer = loop {
+    let mut control_send = loop {
         if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
             buf.drain(..consumed);
-            break match_message(&msg, writer, &password).await?;
+            break match_message(&msg, control_send, &password).await?;
         }
 
         let mut tmp = [0u8; 4096];
-        let n = reader.read(&mut tmp).await?;
+        let n = control_recv.read(&mut tmp).await?;
 
-        if n == 0 {
+        if n == Some(0) {
             anyhow::bail!("Connection closed before auth");
         }
 
-        buf.extend_from_slice(&tmp[..n]);
+        if let Some(n) = n {
+            buf.extend_from_slice(&tmp[..n]);
+        }
     };
 
     info!("Client {peer} authenticated");
@@ -68,7 +80,7 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr, password: String) ->
             Ok(Ok(Some((sw, sh, patches)))) => {
                 info!("Sending initial frame {sw}x{sh} with {} patches", patches.len());
                 let encoded = encode(&ServerMessage::DeltaFrame { screen_width: sw, screen_height: sh, patches })?;
-                writer.write_all(&encoded).await?;
+                frame_send.write_all(&encoded).await?;
             }
             Ok(Ok(None)) => warn!("Initial capture returned nothing"),
             Ok(Err(e)) => warn!("Initial capture error: {e}"),
@@ -111,18 +123,18 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr, password: String) ->
         tokio::select! {
             Some((screen_width, screen_height, patches)) = frame_rx.recv() => {
                 let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches })?;
-                writer.write_all(&encoded).await?;
+                frame_send.write_all(&encoded).await?;
             }
             _ = clipboard_ticker.tick() => {
                 if let Some(text) = clipboard::get_clipboard() {
                     if text != last_clipboard {
                         last_clipboard = text.clone();
                         let encoded = encode(&ServerMessage::ClipboardSync { text })?;
-                        writer.write_all(&encoded).await?;
+                        control_send.write_all(&encoded).await?;
                     }
                 }
             }
-            msg = read_message(&mut reader, &mut buf) => {
+            msg = read_message(&mut control_recv, &mut buf) => {
                 match msg? {
                     ClientMessage::MouseMove { x, y } => input::inject_mouse_move(x, y)?,
                     ClientMessage::MouseButton { button, pressed, .. } => input::inject_mouse_button(&button, pressed)?,
@@ -137,53 +149,47 @@ async fn handle_client(stream: TcpStream, peer: SocketAddr, password: String) ->
     }
 }
 
-async fn match_message(msg: &ClientMessage, mut writer: OwnedWriteHalf, password: &str) -> Result<OwnedWriteHalf> {
+async fn match_message(msg: &ClientMessage, mut control_send: quinn::SendStream, password: &str) -> Result<quinn::SendStream> {
     match msg {
         ClientMessage::Handshake { version, password: client_password } => {
             if version != &PROTOCOL_VERSION {
-                let error_message = ServerMessage::AuthResult {
+                let bytes = encode(&ServerMessage::AuthResult {
                     success: false,
                     reason: Some(String::from("Wrong protocol version")),
-                };
-                let bytes = encode(&error_message)?;
-                writer.write_all(&bytes).await?;
+                })?;
+                control_send.write_all(&bytes).await?;
                 Err(anyhow::anyhow!("Wrong version"))
             } else if client_password == password {
-                let response_message = ServerMessage::AuthResult {
+                let bytes = encode(&ServerMessage::AuthResult {
                     success: true,
                     reason: None,
-                };
-                let bytes = encode(&response_message)?;
-                writer.write_all(&bytes).await?;
-                Ok(writer)
+                })?;
+                control_send.write_all(&bytes).await?;
+                Ok(control_send)
             } else {
-                let error_message = ServerMessage::AuthResult {
+                let bytes = encode(&ServerMessage::AuthResult {
                     success: false,
                     reason: Some(String::from("Wrong password")),
-                };
-                let bytes = encode(&error_message)?;
-                writer.write_all(&bytes).await?;
+                })?;
+                control_send.write_all(&bytes).await?;
                 Err(anyhow::anyhow!("Wrong password"))
             }
         }
-        _ => Ok(writer)
+        _ => Ok(control_send)
     }
 }
 
-async fn read_message(reader: &mut OwnedReadHalf, buf: &mut Vec<u8>) -> Result<ClientMessage> {
+async fn read_message(recv: &mut quinn::RecvStream, buf: &mut Vec<u8>) -> Result<ClientMessage> {
     loop {
-        if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
+        if let Some((msg, consumed)) = decode::<ClientMessage>(buf)? {
             buf.drain(..consumed);
             return Ok(msg);
         }
 
         let mut tmp = [0u8; 4096];
-        let n = reader.read(&mut tmp).await?;
-
-        if n == 0 {
-            anyhow::bail!("Connection closed");
+        match recv.read(&mut tmp).await? {
+            Some(n) => buf.extend_from_slice(&tmp[..n]),
+            None => anyhow::bail!("Connection closed"),
         }
-
-        buf.extend_from_slice(&tmp[..n]);
     }
 }
