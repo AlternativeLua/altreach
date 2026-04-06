@@ -96,10 +96,16 @@ impl Display {
             }
             Ok(None) => {}
             Err(e) => {
-                // Don't recreate the decoder — dsRefLost and dsNoParamSets are
-                // recoverable; the next IDR frame will reset the reference state.
                 tracing::warn!("Decode error: {e}");
                 self.needs_keyframe = true;
+                // Recreate for fatal states (e.g. dsOutOfMemory). With decode-all-in-order
+                // the new decoder will wait for the next IDR before decoding anything.
+                if let Ok(dec) = Decoder::with_api_config(
+                    OpenH264API::from_source(),
+                    openh264::decoder::DecoderConfig::default(),
+                ) {
+                    self.decoder = dec;
+                }
             }
         }
     }

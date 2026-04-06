@@ -29,6 +29,8 @@ pub struct H264Encoder {
     sequence_header: Vec<u8>,
     /// False until we have successfully delivered param sets to the client.
     headers_sent: bool,
+    /// Input frame counter used to request IDR frames every GOP_SIZE frames.
+    frame_count: u32,
 }
 
 // COM objects are safe to send across threads when using COINIT_MULTITHREADED
@@ -184,6 +186,7 @@ impl H264Encoder {
             output_queue: VecDeque::new(),
             sequence_header,
             headers_sent: false,
+            frame_count: 0,
         })
     }
 
@@ -289,6 +292,12 @@ impl H264Encoder {
         sample.SetSampleDuration(333_333)?;
         self.timestamp += 333_333;
 
+        // Request IDR every 60 frames so the client can recover within ~2 s.
+        self.frame_count += 1;
+        if self.frame_count % 60 == 1 {
+            let _ = sample.SetUINT32(&MFSampleExtension_CleanPoint, 1);
+        }
+
         self.transform.ProcessInput(0, &sample, 0)?;
         self.get_output()
     }
@@ -311,6 +320,12 @@ impl H264Encoder {
             sample.SetSampleTime(self.timestamp)?;
             sample.SetSampleDuration(333_333)?;
             self.timestamp += 333_333;
+
+            // Request IDR every 60 frames so the client can recover within ~2 s.
+            self.frame_count += 1;
+            if self.frame_count % 60 == 1 {
+                let _ = sample.SetUINT32(&MFSampleExtension_CleanPoint, 1);
+            }
 
             self.transform.ProcessInput(0, &sample, 0)?;
             self.need_input = false;
