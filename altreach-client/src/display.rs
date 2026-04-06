@@ -1,4 +1,5 @@
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::Duration;
 use egui::{ColorImage, TextureHandle};
 use altreach_proto::{ClientMessage, ServerMessage};
 use openh264::formats::YUVSource;
@@ -36,7 +37,6 @@ pub struct Display {
     last_clipboard: String,
     decoder: Decoder,
     rgba_buf: Vec<u8>,
-    frames_received: u32,
     needs_keyframe: bool,
 }
 
@@ -56,20 +56,11 @@ impl Display {
             last_clipboard: String::new(),
             decoder,
             rgba_buf: Vec::new(),
-            frames_received: 0,
             needs_keyframe: true,
         }
     }
 
-    fn decode_and_upload(&mut self, ctx: &egui::Context, data: &[u8], width: u32, height: u32) {
-        self.frames_received += 1;
-        if self.frames_received <= 5 && data.len() >= 8 {
-            tracing::info!(
-                "Frame {} ({} bytes): {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
-                self.frames_received, data.len(),
-                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]
-            );
-        }
+    fn decode_and_upload(&mut self, ctx: &egui::Context, data: &[u8]) {
         match self.decoder.decode(data) {
             Ok(Some(yuv)) => {
                 self.needs_keyframe = false;
@@ -105,14 +96,10 @@ impl Display {
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!("Decode error: {e}, recreating decoder");
+                // Don't recreate the decoder — dsRefLost and dsNoParamSets are
+                // recoverable; the next IDR frame will reset the reference state.
+                tracing::warn!("Decode error: {e}");
                 self.needs_keyframe = true;
-                if let Ok(dec) = Decoder::with_api_config(
-                    OpenH264API::from_source(),
-                    openh264::decoder::DecoderConfig::default(),
-                ) {
-                    self.decoder = dec;
-                }
             }
         }
     }
@@ -120,36 +107,24 @@ impl Display {
 
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain all pending messages. Track the latest IDR (keyframe) and latest
-        // delta frame separately. If we need a keyframe (decoder was just reset),
-        // only decode an IDR. Otherwise prefer the latest delta, falling back to
-        // the IDR if no delta arrived this tick.
-        let mut latest_keyframe: Option<(u32, u32, Vec<u8>)> = None;
-        let mut latest_delta: Option<(u32, u32, Vec<u8>)> = None;
+        // Drain all pending messages and decode every frame in order.
+        // H.264 P-frames reference previous frames, so we must not skip them or
+        // the reference chain breaks (dsRefLost). When needs_keyframe is set we
+        // skip P-frames cheaply until the next IDR resets the decoder state.
         while let Ok(msg) = self.receiver.try_recv() {
             match msg {
                 ServerMessage::ClipboardSync { text } => {
                     self.clipboard.set_text(&text).ok();
                     self.last_clipboard = text;
                 }
-                ServerMessage::VideoFrame { width, height, data } => {
-                    if frame_has_sps(&data) {
-                        latest_keyframe = Some((width, height, data));
-                        latest_delta = None; // delta frames before this IDR are useless
-                    } else {
-                        latest_delta = Some((width, height, data));
+                ServerMessage::VideoFrame { width: _, height: _, data } => {
+                    if self.needs_keyframe && !frame_has_sps(&data) {
+                        continue;
                     }
+                    self.decode_and_upload(ctx, &data);
                 }
                 _ => {}
             }
-        }
-        let to_decode = if self.needs_keyframe {
-            latest_keyframe
-        } else {
-            latest_delta.or(latest_keyframe)
-        };
-        if let Some((width, height, data)) = to_decode {
-            self.decode_and_upload(ctx, &data, width, height);
         }
 
         if let Ok(text) = self.clipboard.get_text() {
@@ -165,7 +140,9 @@ impl eframe::App for Display {
             }
         });
 
-        ctx.request_repaint();
+        // Rate-limit to ~60 fps. Without a delay, request_repaint() spins the
+        // event loop at full CPU speed causing unnecessary load on the client.
+        ctx.request_repaint_after(Duration::from_millis(16));
 
         let mut msgs = Vec::new();
         let screen_rect = ctx.screen_rect();
