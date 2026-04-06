@@ -37,7 +37,7 @@ fn main() -> Result<()> {
 
             info!("Handshake sent");
 
-            match conn.control_recv.recv_control().await {
+            match conn.receiver.recv().await {
                 Ok(ServerMessage::AuthResult { success: true, .. }) => info!("Authenticated"),
                 Ok(ServerMessage::AuthResult { success: false, reason }) => {
                     tracing::error!("Auth failed: {:?}", reason);
@@ -49,16 +49,10 @@ fn main() -> Result<()> {
 
             loop {
                 tokio::select! {
-                    msg = conn.frame_recv.recv_frame() => {
+                    msg = conn.receiver.recv() => {
                         match msg {
                             Ok(m) => { let _ = frame_tx.send(m); }
                             Err(e) => { tracing::error!("Disconnected: {e}"); break; }
-                        }
-                    }
-                    msg = conn.control_recv.recv_control() => {
-                        match msg {
-                            Ok(m) => { let _ = frame_tx.send(m); }
-                            Err(e) => { tracing::error!("Control error: {e}"); break; }
                         }
                     }
                     Ok(msg) = async { input_rx.try_recv() } => {

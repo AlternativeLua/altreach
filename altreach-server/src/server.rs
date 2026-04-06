@@ -54,28 +54,22 @@ pub async fn run(addr: &str, password: String) -> Result<()> {
 
 async fn handle_client(conn: Connection, password: String) -> Result<()> {
     let peer = conn.remote_address();
-    info!("Accepting control stream from {peer}");
-    let (control_send, mut control_recv) = conn.accept_bi().await?;
-    info!("Control stream accepted from {peer}");
-    let mut frame_send = conn.open_uni().await?;
-    info!("Frame stream opened to {peer}");
+    info!("Accepting stream from {peer}");
+    let (mut send, mut recv) = conn.accept_bi().await?;
+    info!("Stream accepted from {peer}");
     let mut buf = Vec::new();
 
-    let mut control_send = loop {
+    let mut send = loop {
         if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
             buf.drain(..consumed);
-            break match_message(&msg, control_send, &password).await?;
+            break match_message(&msg, send, &password).await?;
         }
 
         let mut tmp = [0u8; 4096];
-        let n = control_recv.read(&mut tmp).await?;
-
-        if n == Some(0) {
-            anyhow::bail!("Connection closed before auth");
-        }
-
-        if let Some(n) = n {
+        if let Some(n) = recv.read(&mut tmp).await? {
             buf.extend_from_slice(&tmp[..n]);
+        } else {
+            anyhow::bail!("Connection closed before auth");
         }
     };
 
@@ -90,7 +84,7 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
             Ok(Ok(Some((sw, sh, patches)))) => {
                 info!("Sending initial frame {sw}x{sh} with {} patches", patches.len());
                 let encoded = encode(&ServerMessage::DeltaFrame { screen_width: sw, screen_height: sh, patches })?;
-                frame_send.write_all(&encoded).await?;
+                send.write_all(&encoded).await?;
             }
             Ok(Ok(None)) => warn!("Initial capture returned nothing"),
             Ok(Err(e)) => warn!("Initial capture error: {e}"),
@@ -115,10 +109,10 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
                 match result {
                     Ok(Ok(Some(frame))) => {
                         if frame_tx.send(frame).await.is_err() {
-                            break; // receiver dropped, client disconnected
+                            break;
                         }
                     }
-                    Ok(Ok(None)) => {} // no new frame
+                    Ok(Ok(None)) => {}
                     Ok(Err(e)) => { warn!("Capture error: {e}"); break; }
                     Err(e) => { warn!("Capture task error: {e}"); break; }
                 }
@@ -133,18 +127,18 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
         tokio::select! {
             Some((screen_width, screen_height, patches)) = frame_rx.recv() => {
                 let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches })?;
-                frame_send.write_all(&encoded).await?;
+                send.write_all(&encoded).await?;
             }
             _ = clipboard_ticker.tick() => {
                 if let Some(text) = clipboard::get_clipboard() {
                     if text != last_clipboard {
                         last_clipboard = text.clone();
                         let encoded = encode(&ServerMessage::ClipboardSync { text })?;
-                        control_send.write_all(&encoded).await?;
+                        send.write_all(&encoded).await?;
                     }
                 }
             }
-            msg = read_message(&mut control_recv, &mut buf) => {
+            msg = read_message(&mut recv, &mut buf) => {
                 match msg? {
                     ClientMessage::MouseMove { x, y } => input::inject_mouse_move(x, y)?,
                     ClientMessage::MouseButton { button, pressed, .. } => input::inject_mouse_button(&button, pressed)?,
@@ -159,7 +153,7 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
     }
 }
 
-async fn match_message(msg: &ClientMessage, mut control_send: quinn::SendStream, password: &str) -> Result<quinn::SendStream> {
+async fn match_message(msg: &ClientMessage, mut send: quinn::SendStream, password: &str) -> Result<quinn::SendStream> {
     match msg {
         ClientMessage::Handshake { version, password: client_password } => {
             if version != &PROTOCOL_VERSION {
@@ -167,25 +161,25 @@ async fn match_message(msg: &ClientMessage, mut control_send: quinn::SendStream,
                     success: false,
                     reason: Some(String::from("Wrong protocol version")),
                 })?;
-                control_send.write_all(&bytes).await?;
+                send.write_all(&bytes).await?;
                 Err(anyhow::anyhow!("Wrong version"))
             } else if client_password == password {
                 let bytes = encode(&ServerMessage::AuthResult {
                     success: true,
                     reason: None,
                 })?;
-                control_send.write_all(&bytes).await?;
-                Ok(control_send)
+                send.write_all(&bytes).await?;
+                Ok(send)
             } else {
                 let bytes = encode(&ServerMessage::AuthResult {
                     success: false,
                     reason: Some(String::from("Wrong password")),
                 })?;
-                control_send.write_all(&bytes).await?;
+                send.write_all(&bytes).await?;
                 Err(anyhow::anyhow!("Wrong password"))
             }
         }
-        _ => Ok(control_send)
+        _ => Ok(send)
     }
 }
 

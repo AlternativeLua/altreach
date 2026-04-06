@@ -30,24 +30,18 @@ impl rustls::client::danger::ServerCertVerifier for SkipVerification {
     }
 }
 
-pub struct ControlSender {
+pub struct Sender {
     send: SendStream,
 }
 
-pub struct FrameReceiver {
-    recv: RecvStream,
-    buf: Vec<u8>,
-}
-
-pub struct ControlReceiver {
+pub struct Receiver {
     recv: RecvStream,
     buf: Vec<u8>,
 }
 
 pub struct Connection {
-    pub sender: ControlSender,
-    pub frame_recv: FrameReceiver,
-    pub control_recv: ControlReceiver,
+    pub sender: Sender,
+    pub receiver: Receiver,
 }
 
 impl Connection {
@@ -76,20 +70,17 @@ impl Connection {
         let conn = endpoint.connect(addr.parse()?, "altreach")?.await?;
         tracing::info!("QUIC connection established");
 
-        let ((control_send, control_recv), frame_recv) = tokio::try_join!(
-            conn.open_bi(),
-            conn.accept_uni(),
-        )?;
-        tracing::info!("Streams ready");
+        let (send, recv) = conn.open_bi().await?;
+        tracing::info!("Stream ready");
 
         Ok(Self {
-            sender: ControlSender { send: control_send },
-            frame_recv: FrameReceiver { recv: frame_recv, buf: Vec::new() },
-            control_recv: ControlReceiver { recv: control_recv, buf: Vec::new() },
+            sender: Sender { send },
+            receiver: Receiver { recv, buf: Vec::new() },
         })
     }
 }
-impl ControlSender {
+
+impl Sender {
     pub async fn send(&mut self, msg: &ClientMessage) -> Result<()> {
         let bytes = encode(msg)?;
         self.send.write_all(&bytes).await?;
@@ -97,8 +88,8 @@ impl ControlSender {
     }
 }
 
-impl ControlReceiver {
-    pub async fn recv_control(&mut self) -> Result<ServerMessage> {
+impl Receiver {
+    pub async fn recv(&mut self) -> Result<ServerMessage> {
         loop {
             if let Some((msg, consumed)) = decode::<ServerMessage>(&self.buf)? {
                 self.buf.drain(..consumed);
@@ -108,24 +99,7 @@ impl ControlReceiver {
             let mut tmp = [0u8; 4096];
             match self.recv.read(&mut tmp).await? {
                 Some(n) => self.buf.extend_from_slice(&tmp[..n]),
-                None => anyhow::bail!("Control stream closed"),
-            }
-        }
-    }
-}
-
-impl FrameReceiver {
-    pub async fn recv_frame(&mut self) -> Result<ServerMessage> {
-        loop {
-            if let Some((msg, consumed)) = decode::<ServerMessage>(&self.buf)? {
-                self.buf.drain(..consumed);
-                return Ok(msg);
-            }
-
-            let mut tmp = [0u8; 4096];
-            match self.recv.read(&mut tmp).await? {
-                Some(n) => self.buf.extend_from_slice(&tmp[..n]),
-                None => anyhow::bail!("Frame stream closed"),
+                None => anyhow::bail!("Stream closed"),
             }
         }
     }
