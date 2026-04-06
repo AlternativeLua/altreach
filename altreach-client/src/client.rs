@@ -71,9 +71,13 @@ impl Connection {
         endpoint.set_default_client_config(client_config);
 
         let conn = endpoint.connect(addr.parse()?, "altreach")?.await?;
+        tracing::info!("QUIC connection established");
 
         let (control_send, control_recv) = conn.open_bi().await?;
+        tracing::info!("Control stream opened");
+
         let frame_recv = conn.accept_uni().await?;
+        tracing::info!("Frame stream accepted");
 
         Ok(Self {
             sender: ControlSender { send: control_send },

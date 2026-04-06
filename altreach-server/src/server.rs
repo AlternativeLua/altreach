@@ -47,10 +47,13 @@ pub async fn run(addr: &str, password: String) -> Result<()> {
 }
 
 async fn handle_client(conn: Connection, password: String) -> Result<()> {
-    let (control_send, mut control_recv) = conn.accept_bi().await?;
-    let mut frame_send = conn.open_uni().await?;
-    let mut buf = Vec::new();
     let peer = conn.remote_address();
+    info!("Accepting control stream from {peer}");
+    let (control_send, mut control_recv) = conn.accept_bi().await?;
+    info!("Control stream accepted from {peer}");
+    let mut frame_send = conn.open_uni().await?;
+    info!("Frame stream opened to {peer}");
+    let mut buf = Vec::new();
 
     let mut control_send = loop {
         if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
