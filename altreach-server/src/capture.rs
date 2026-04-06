@@ -6,15 +6,13 @@ use windows::Win32::Graphics::{
 use windows::Win32::Graphics::Direct3D::*;
 use anyhow::Result;
 use windows::core::Interface;
-use altreach_proto::FramePatch;
-use crate::encoder::compress;
 
 pub struct Capturer {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
     staging: Option<ID3D11Texture2D>,
-    staging_size: (u32, u32),
+    pub staging_size: (u32, u32),
 }
 
 impl Capturer {
@@ -48,31 +46,8 @@ impl Capturer {
         }
     }
 
-    /// Capture the full screen as a single patch — used for the initial frame on connect.
-    pub fn capture_full(&mut self) -> Result<Option<(u32, u32, Vec<FramePatch>)>> {
-        unsafe {
-            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
-            let mut resource: Option<IDXGIResource> = None;
-
-            match self.duplication.AcquireNextFrame(500, &mut frame_info, &mut resource) {
-                Ok(_) => {}
-                Err(e) if e.code().0 as u32 == 0x887A0027 => return Ok(None),
-                Err(e) => return Err(e.into()),
-            }
-
-            let gpu_texture: ID3D11Texture2D = resource.unwrap().cast()?;
-            let pixels = self.copy_texture(&gpu_texture)?;
-            self.duplication.ReleaseFrame()?;
-
-            let (width, height) = self.staging_size;
-            let data = compress(&pixels)?;
-            let patches = vec![FramePatch { x: 0, y: 0, width, height, data }];
-            Ok(Some((width, height, patches)))
-        }
-    }
-
-    /// Capture only dirty rectangles for incremental updates.
-    pub fn capture_frame(&mut self) -> Result<Option<(u32, u32, Vec<FramePatch>)>> {
+    /// Capture the full screen as raw BGRA. Returns None if no new frame is available.
+    pub fn capture_frame(&mut self) -> Result<Option<Vec<u8>>> {
         unsafe {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
@@ -90,62 +65,9 @@ impl Capturer {
 
             let gpu_texture: ID3D11Texture2D = resource.unwrap().cast()?;
             let pixels = self.copy_texture(&gpu_texture)?;
-            let (width, height) = self.staging_size;
-
-            // Fetch dirty rects with a retry loop for DXGI_ERROR_MORE_DATA.
-            let mut rects: Vec<windows::Win32::Foundation::RECT> = vec![Default::default(); 16];
-            let dirty_rects = loop {
-                let mut bytes_needed: u32 = 0;
-                let result = self.duplication.GetFrameDirtyRects(
-                    (rects.len() * std::mem::size_of::<windows::Win32::Foundation::RECT>()) as u32,
-                    rects.as_mut_ptr(),
-                    &mut bytes_needed,
-                );
-                match result {
-                    Ok(()) => {
-                        let count = bytes_needed as usize / std::mem::size_of::<windows::Win32::Foundation::RECT>();
-                        rects.truncate(count);
-                        break rects;
-                    }
-                    Err(e) if e.code().0 as u32 == 0x887A0003 => {
-                        // DXGI_ERROR_MORE_DATA — resize and retry
-                        let count = bytes_needed as usize / std::mem::size_of::<windows::Win32::Foundation::RECT>();
-                        rects.resize(count, Default::default());
-                    }
-                    Err(e) => {
-                        self.duplication.ReleaseFrame()?;
-                        return Err(e.into());
-                    }
-                }
-            };
-
             self.duplication.ReleaseFrame()?;
 
-            if dirty_rects.is_empty() {
-                return Ok(None);
-            }
-
-            let mut patches = Vec::with_capacity(dirty_rects.len());
-            for rect in &dirty_rects {
-                let x = rect.left as u32;
-                let y = rect.top as u32;
-                let w = (rect.right - rect.left) as u32;
-                let h = (rect.bottom - rect.top) as u32;
-
-                if w == 0 || h == 0 {
-                    continue;
-                }
-
-                let mut patch_pixels = Vec::with_capacity((w * h * 4) as usize);
-                for row in 0..h {
-                    let row_start = ((y + row) * width + x) as usize * 4;
-                    patch_pixels.extend_from_slice(&pixels[row_start..row_start + w as usize * 4]);
-                }
-
-                patches.push(FramePatch { x, y, width: w, height: h, data: compress(&patch_pixels)? });
-            }
-
-            Ok(Some((width, height, patches)))
+            Ok(Some(pixels))
         }
     }
 

@@ -18,11 +18,7 @@ pub enum ServerMessage {
     Pong,
     Disconnect { reason: String },
     ClipboardSync { text: String },
-    DeltaFrame {
-        screen_width: u32,
-        screen_height: u32,
-        patches: Vec<FramePatch>,
-    },
+    VideoFrame { width: u32, height: u32, data: Vec<u8> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,15 +26,6 @@ pub enum MouseButton {
     Left,
     Right,
     Middle,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FramePatch {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-    pub data: Vec<u8>,
 }
 
 // Wire format: [u32 length (4 bytes, little-endian)][bincode payload]
@@ -66,4 +53,4 @@ pub fn decode<T: for<'de> Deserialize<'de>>(
     Ok(Some((msg, 4 + len)))
 }
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;

@@ -6,7 +6,38 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing::{info, warn, error};
 use altreach_proto::*;
 use crate::capture::Capturer;
+use crate::encoder::H264Encoder;
 use crate::{clipboard, input};
+
+struct CaptureEncoder {
+    capturer: Capturer,
+    encoder: Option<H264Encoder>,
+}
+
+impl CaptureEncoder {
+    fn new() -> Result<Self> {
+        Ok(Self { capturer: Capturer::new()?, encoder: None })
+    }
+
+    fn capture_and_encode(&mut self) -> Result<Option<(u32, u32, Vec<u8>)>> {
+        let bgra = match self.capturer.capture_frame()? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        let (w, h) = self.capturer.staging_size;
+
+        if self.encoder.is_none() {
+            info!("Creating H.264 encoder for {w}x{h}");
+            self.encoder = Some(H264Encoder::new(w, h)?);
+        }
+
+        match self.encoder.as_mut().unwrap().encode(&bgra)? {
+            Some(data) => Ok(Some((w, h, data))),
+            None => Ok(None),
+        }
+    }
+}
 
 pub async fn run(addr: &str, password: String) -> Result<()> {
     let cert = rcgen::generate_simple_self_signed(vec!["altreach".to_string()])?;
@@ -54,7 +85,6 @@ pub async fn run(addr: &str, password: String) -> Result<()> {
 
 async fn handle_client(conn: Connection, password: String) -> Result<()> {
     let peer = conn.remote_address();
-    info!("Accepting streams from {peer}");
     let (mut control_send, mut control_recv) = conn.accept_bi().await?;
     info!("Control stream accepted from {peer}");
     let (mut frame_send, _) = conn.accept_bi().await?;
@@ -66,7 +96,6 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
             buf.drain(..consumed);
             break match_message(&msg, control_send, &password).await?;
         }
-
         let mut tmp = [0u8; 4096];
         if let Some(n) = control_recv.read(&mut tmp).await? {
             buf.extend_from_slice(&tmp[..n]);
@@ -77,46 +106,28 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
 
     info!("Client {peer} authenticated");
 
-    let capturer = Arc::new(Mutex::new(Capturer::new()?));
+    let cap_enc = Arc::new(Mutex::new(CaptureEncoder::new()?));
 
-    // Send initial full frame
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(u32, u32, Vec<u8>)>(2);
+
     {
-        let cap = capturer.clone();
-        match tokio::task::spawn_blocking(move || cap.lock().unwrap().capture_full()).await {
-            Ok(Ok(Some((sw, sh, patches)))) => {
-                info!("Sending initial frame {sw}x{sh} with {} patches", patches.len());
-                let encoded = encode(&ServerMessage::DeltaFrame { screen_width: sw, screen_height: sh, patches })?;
-                frame_send.write_all(&encoded).await?;
-            }
-            Ok(Ok(None)) => warn!("Initial capture returned nothing"),
-            Ok(Err(e)) => warn!("Initial capture error: {e}"),
-            Err(e) => warn!("Initial capture task error: {e}"),
-        }
-    }
-
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(u32, u32, Vec<FramePatch>)>(2);
-
-    // Dedicated capture task — runs independently so the input loop is never blocked.
-    {
-        let capturer = capturer.clone();
+        let cap_enc = cap_enc.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(33));
             loop {
                 ticker.tick().await;
-                let cap = capturer.clone();
+                let ce = cap_enc.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    cap.lock().unwrap().capture_frame()
+                    ce.lock().unwrap().capture_and_encode()
                 }).await;
 
                 match result {
                     Ok(Ok(Some(frame))) => {
-                        if frame_tx.send(frame).await.is_err() {
-                            break;
-                        }
+                        if frame_tx.send(frame).await.is_err() { break; }
                     }
                     Ok(Ok(None)) => {}
-                    Ok(Err(e)) => { warn!("Capture error: {e}"); break; }
-                    Err(e) => { warn!("Capture task error: {e}"); break; }
+                    Ok(Err(e)) => { warn!("Capture/encode error: {e}"); break; }
+                    Err(e) => { warn!("Task error: {e}"); break; }
                 }
             }
         });
@@ -127,8 +138,8 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
 
     loop {
         tokio::select! {
-            Some((screen_width, screen_height, patches)) = frame_rx.recv() => {
-                let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches })?;
+            Some((width, height, data)) = frame_rx.recv() => {
+                let encoded = encode(&ServerMessage::VideoFrame { width, height, data })?;
                 frame_send.write_all(&encoded).await?;
             }
             _ = clipboard_ticker.tick() => {
@@ -159,24 +170,15 @@ async fn match_message(msg: &ClientMessage, mut control_send: quinn::SendStream,
     match msg {
         ClientMessage::Handshake { version, password: client_password } => {
             if version != &PROTOCOL_VERSION {
-                let bytes = encode(&ServerMessage::AuthResult {
-                    success: false,
-                    reason: Some(String::from("Wrong protocol version")),
-                })?;
+                let bytes = encode(&ServerMessage::AuthResult { success: false, reason: Some("Wrong protocol version".into()) })?;
                 control_send.write_all(&bytes).await?;
                 Err(anyhow::anyhow!("Wrong version"))
             } else if client_password == password {
-                let bytes = encode(&ServerMessage::AuthResult {
-                    success: true,
-                    reason: None,
-                })?;
+                let bytes = encode(&ServerMessage::AuthResult { success: true, reason: None })?;
                 control_send.write_all(&bytes).await?;
                 Ok(control_send)
             } else {
-                let bytes = encode(&ServerMessage::AuthResult {
-                    success: false,
-                    reason: Some(String::from("Wrong password")),
-                })?;
+                let bytes = encode(&ServerMessage::AuthResult { success: false, reason: Some("Wrong password".into()) })?;
                 control_send.write_all(&bytes).await?;
                 Err(anyhow::anyhow!("Wrong password"))
             }
@@ -191,7 +193,6 @@ async fn read_message(recv: &mut quinn::RecvStream, buf: &mut Vec<u8>) -> Result
             buf.drain(..consumed);
             return Ok(msg);
         }
-
         let mut tmp = [0u8; 4096];
         match recv.read(&mut tmp).await? {
             Some(n) => buf.extend_from_slice(&tmp[..n]),
