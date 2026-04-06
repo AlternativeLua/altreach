@@ -80,13 +80,27 @@ impl Display {
                 self.texture = Some(ctx.load_texture("frame", image, Default::default()));
             }
             Ok(None) => {}
-            Err(e) => tracing::warn!("Decode error: {e}"),
+            Err(e) => {
+                tracing::warn!("Decode error: {e}, recreating decoder");
+                // Recreate the decoder to clear any broken state.
+                // The next IDR frame (with embedded SPS/PPS) will re-initialize it.
+                if let Ok(dec) = Decoder::with_api_config(
+                    OpenH264API::from_source(),
+                    openh264::decoder::DecoderConfig::default(),
+                ) {
+                    self.decoder = dec;
+                }
+            }
         }
     }
 }
 
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Drain all pending messages but only decode the LATEST VideoFrame.
+        // Processing every queued frame would block the UI thread and cause
+        // a cascade of tracing::warn! calls that freeze the window.
+        let mut latest_frame: Option<(u32, u32, Vec<u8>)> = None;
         while let Ok(msg) = self.receiver.try_recv() {
             match msg {
                 ServerMessage::ClipboardSync { text } => {
@@ -94,10 +108,13 @@ impl eframe::App for Display {
                     self.last_clipboard = text;
                 }
                 ServerMessage::VideoFrame { width, height, data } => {
-                    self.decode_and_upload(ctx, &data, width, height);
+                    latest_frame = Some((width, height, data));
                 }
                 _ => {}
             }
+        }
+        if let Some((width, height, data)) = latest_frame {
+            self.decode_and_upload(ctx, &data, width, height);
         }
 
         if let Ok(text) = self.clipboard.get_text() {
