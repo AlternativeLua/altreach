@@ -51,10 +51,11 @@ pub struct Connection {
 
 impl Connection {
     pub async fn connect(addr: &str) -> Result<Self> {
-        let crypto = rustls::ClientConfig::builder()
+        let mut crypto = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipVerification))
             .with_no_client_auth();
+        crypto.alpn_protocols = vec![b"altreach".to_vec()];
 
         let client_config = ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?

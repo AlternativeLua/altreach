@@ -14,9 +14,10 @@ pub async fn run(addr: &str, password: String) -> Result<()> {
     let key_der = PrivateKeyDer::try_from(cert.key_pair.serialize_der())
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let server_crypto = rustls::ServerConfig::builder()
+    let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert_der], key_der)?;
+    server_crypto.alpn_protocols = vec![b"altreach".to_vec()];
 
     let server_config = ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?
