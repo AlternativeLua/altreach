@@ -387,8 +387,8 @@ impl H264Encoder {
                         );
                     }
 
-                    // AMD hardware encoder only populates MF_MT_MPEG_SEQUENCE_HEADER
-                    // after the first frame is encoded, so read it lazily here.
+                    // AMD async encoder emits P-frames before the first IDR.
+                    // Lazily re-try reading the sequence header each frame.
                     if self.sequence_header.is_empty() {
                         let hdr = Self::read_sequence_header(&self.transform);
                         if !hdr.is_empty() {
@@ -398,17 +398,25 @@ impl H264Encoder {
                     }
 
                     let is_key = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
-                    let need_headers = (is_key || !self.headers_sent) && !self.sequence_header.is_empty();
-                    // Don't double-prepend if the encoder already embedded SPS inline.
                     let already_has_sps = annex_b_has_sps(&bitstream);
 
-                    let data = if need_headers && !already_has_sps {
+                    // Drop pre-IDR P-frames: the client cannot decode them without a
+                    // preceding IDR, and AMD async encoders often produce a run of
+                    // P-frames at startup before the first keyframe.
+                    if !is_key && !already_has_sps && !self.headers_sent {
+                        return Ok(None);
+                    }
+
+                    // Prepend SPS+PPS to IDR frames that don't have them inline.
+                    let data = if is_key && !already_has_sps && !self.sequence_header.is_empty() {
                         self.headers_sent = true;
                         let mut v = self.sequence_header.clone();
                         v.extend_from_slice(&bitstream);
                         v
                     } else {
-                        if need_headers { self.headers_sent = true; }
+                        if already_has_sps || is_key {
+                            self.headers_sent = true;
+                        }
                         bitstream
                     };
 

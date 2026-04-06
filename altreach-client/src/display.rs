@@ -6,6 +6,27 @@ use openh264::decoder::Decoder;
 use openh264::OpenH264API;
 use crate::input::egui_key_to_vk;
 
+/// Returns true if the Annex B bitstream contains a SPS NAL (type 7),
+/// indicating this is an IDR frame with parameter sets prepended.
+fn frame_has_sps(data: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < data.len() {
+        let nal_offset = if data[i..].starts_with(&[0, 0, 0, 1]) {
+            i + 4
+        } else if data[i..].starts_with(&[0, 0, 1]) {
+            i + 3
+        } else {
+            i += 1;
+            continue;
+        };
+        if nal_offset < data.len() && (data[nal_offset] & 0x1F) == 7 {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 pub struct Display {
     texture: Option<TextureHandle>,
     receiver: Receiver<ServerMessage>,
@@ -16,6 +37,7 @@ pub struct Display {
     decoder: Decoder,
     rgba_buf: Vec<u8>,
     frames_received: u32,
+    needs_keyframe: bool,
 }
 
 impl Display {
@@ -35,6 +57,7 @@ impl Display {
             decoder,
             rgba_buf: Vec::new(),
             frames_received: 0,
+            needs_keyframe: true,
         }
     }
 
@@ -49,6 +72,7 @@ impl Display {
         }
         match self.decoder.decode(data) {
             Ok(Some(yuv)) => {
+                self.needs_keyframe = false;
                 let (w, h) = yuv.dimensions();
                 let y = yuv.y();
                 let u = yuv.u();
@@ -82,8 +106,7 @@ impl Display {
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!("Decode error: {e}, recreating decoder");
-                // Recreate the decoder to clear any broken state.
-                // The next IDR frame (with embedded SPS/PPS) will re-initialize it.
+                self.needs_keyframe = true;
                 if let Ok(dec) = Decoder::with_api_config(
                     OpenH264API::from_source(),
                     openh264::decoder::DecoderConfig::default(),
@@ -97,10 +120,12 @@ impl Display {
 
 impl eframe::App for Display {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain all pending messages but only decode the LATEST VideoFrame.
-        // Processing every queued frame would block the UI thread and cause
-        // a cascade of tracing::warn! calls that freeze the window.
-        let mut latest_frame: Option<(u32, u32, Vec<u8>)> = None;
+        // Drain all pending messages. Track the latest IDR (keyframe) and latest
+        // delta frame separately. If we need a keyframe (decoder was just reset),
+        // only decode an IDR. Otherwise prefer the latest delta, falling back to
+        // the IDR if no delta arrived this tick.
+        let mut latest_keyframe: Option<(u32, u32, Vec<u8>)> = None;
+        let mut latest_delta: Option<(u32, u32, Vec<u8>)> = None;
         while let Ok(msg) = self.receiver.try_recv() {
             match msg {
                 ServerMessage::ClipboardSync { text } => {
@@ -108,12 +133,22 @@ impl eframe::App for Display {
                     self.last_clipboard = text;
                 }
                 ServerMessage::VideoFrame { width, height, data } => {
-                    latest_frame = Some((width, height, data));
+                    if frame_has_sps(&data) {
+                        latest_keyframe = Some((width, height, data));
+                        latest_delta = None; // delta frames before this IDR are useless
+                    } else {
+                        latest_delta = Some((width, height, data));
+                    }
                 }
                 _ => {}
             }
         }
-        if let Some((width, height, data)) = latest_frame {
+        let to_decode = if self.needs_keyframe {
+            latest_keyframe
+        } else {
+            latest_delta.or(latest_keyframe)
+        };
+        if let Some((width, height, data)) = to_decode {
             self.decode_and_upload(ctx, &data, width, height);
         }
 
