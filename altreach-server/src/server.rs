@@ -55,11 +55,10 @@ pub async fn run(addr: &str, password: String) -> Result<()> {
 async fn handle_client(conn: Connection, password: String) -> Result<()> {
     let peer = conn.remote_address();
     info!("Accepting streams from {peer}");
-    let ((mut control_send, mut control_recv), (mut frame_send, _)) = tokio::try_join!(
-        conn.accept_bi(),
-        conn.accept_bi(),
-    )?;
-    info!("Streams accepted from {peer}");
+    let (mut control_send, mut control_recv) = conn.accept_bi().await?;
+    info!("Control stream accepted from {peer}");
+    let (mut frame_send, _) = conn.accept_bi().await?;
+    info!("Frame stream accepted from {peer}");
     let mut buf = Vec::new();
 
     let mut control_send = loop {

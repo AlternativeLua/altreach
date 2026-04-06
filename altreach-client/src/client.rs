@@ -72,11 +72,10 @@ impl Connection {
         let conn = endpoint.connect(addr.parse()?, "altreach")?.await?;
         tracing::info!("QUIC connection established");
 
-        let ((send, control_recv), (_, frame_recv)) = tokio::try_join!(
-            conn.open_bi(),
-            conn.open_bi(),
-        )?;
-        tracing::info!("Streams ready");
+        let (send, control_recv) = conn.open_bi().await?;
+        tracing::info!("Control stream opened");
+        let (_, frame_recv) = conn.open_bi().await?;
+        tracing::info!("Frame stream opened");
 
         Ok(Self {
             _conn: conn,
