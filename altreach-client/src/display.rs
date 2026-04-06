@@ -15,6 +15,7 @@ pub struct Display {
     last_clipboard: String,
     decoder: Decoder,
     rgba_buf: Vec<u8>,
+    frames_received: u32,
 }
 
 impl Display {
@@ -33,10 +34,19 @@ impl Display {
             last_clipboard: String::new(),
             decoder,
             rgba_buf: Vec::new(),
+            frames_received: 0,
         }
     }
 
     fn decode_and_upload(&mut self, ctx: &egui::Context, data: &[u8], width: u32, height: u32) {
+        self.frames_received += 1;
+        if self.frames_received <= 5 && data.len() >= 8 {
+            tracing::info!(
+                "Frame {} ({} bytes): {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+                self.frames_received, data.len(),
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]
+            );
+        }
         match self.decoder.decode(data) {
             Ok(Some(yuv)) => {
                 let (w, h) = yuv.dimensions();

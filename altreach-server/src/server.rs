@@ -29,12 +29,23 @@ impl CaptureEncoder {
 
         if self.encoder.is_none() {
             info!("Creating H.264 encoder for {w}x{h}");
-            self.encoder = Some(H264Encoder::new(w, h)?);
+            match H264Encoder::new(w, h) {
+                Ok(enc) => self.encoder = Some(enc),
+                Err(e) => {
+                    warn!("Hardware encoder failed ({e}), retrying with software");
+                    self.encoder = Some(H264Encoder::new_software(w, h)?);
+                }
+            }
         }
 
-        match self.encoder.as_mut().unwrap().encode(&bgra)? {
-            Some(data) => Ok(Some((w, h, data))),
-            None => Ok(None),
+        match self.encoder.as_mut().unwrap().encode(&bgra) {
+            Ok(Some(data)) => Ok(Some((w, h, data))),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                warn!("Encoder error ({e}), resetting encoder");
+                self.encoder = None;
+                Ok(None)
+            }
         }
     }
 }
