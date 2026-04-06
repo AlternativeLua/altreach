@@ -54,19 +54,22 @@ pub async fn run(addr: &str, password: String) -> Result<()> {
 
 async fn handle_client(conn: Connection, password: String) -> Result<()> {
     let peer = conn.remote_address();
-    info!("Accepting stream from {peer}");
-    let (mut send, mut recv) = conn.accept_bi().await?;
-    info!("Stream accepted from {peer}");
+    info!("Accepting streams from {peer}");
+    let ((mut control_send, mut control_recv), (mut frame_send, _)) = tokio::try_join!(
+        conn.accept_bi(),
+        conn.accept_bi(),
+    )?;
+    info!("Streams accepted from {peer}");
     let mut buf = Vec::new();
 
-    let mut send = loop {
+    let mut control_send = loop {
         if let Some((msg, consumed)) = decode::<ClientMessage>(&buf)? {
             buf.drain(..consumed);
-            break match_message(&msg, send, &password).await?;
+            break match_message(&msg, control_send, &password).await?;
         }
 
         let mut tmp = [0u8; 4096];
-        if let Some(n) = recv.read(&mut tmp).await? {
+        if let Some(n) = control_recv.read(&mut tmp).await? {
             buf.extend_from_slice(&tmp[..n]);
         } else {
             anyhow::bail!("Connection closed before auth");
@@ -84,7 +87,7 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
             Ok(Ok(Some((sw, sh, patches)))) => {
                 info!("Sending initial frame {sw}x{sh} with {} patches", patches.len());
                 let encoded = encode(&ServerMessage::DeltaFrame { screen_width: sw, screen_height: sh, patches })?;
-                send.write_all(&encoded).await?;
+                frame_send.write_all(&encoded).await?;
             }
             Ok(Ok(None)) => warn!("Initial capture returned nothing"),
             Ok(Err(e)) => warn!("Initial capture error: {e}"),
@@ -127,18 +130,18 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
         tokio::select! {
             Some((screen_width, screen_height, patches)) = frame_rx.recv() => {
                 let encoded = encode(&ServerMessage::DeltaFrame { screen_width, screen_height, patches })?;
-                send.write_all(&encoded).await?;
+                frame_send.write_all(&encoded).await?;
             }
             _ = clipboard_ticker.tick() => {
                 if let Some(text) = clipboard::get_clipboard() {
                     if text != last_clipboard {
                         last_clipboard = text.clone();
                         let encoded = encode(&ServerMessage::ClipboardSync { text })?;
-                        send.write_all(&encoded).await?;
+                        control_send.write_all(&encoded).await?;
                     }
                 }
             }
-            msg = read_message(&mut recv, &mut buf) => {
+            msg = read_message(&mut control_recv, &mut buf) => {
                 match msg? {
                     ClientMessage::MouseMove { x, y } => input::inject_mouse_move(x, y)?,
                     ClientMessage::MouseButton { button, pressed, .. } => input::inject_mouse_button(&button, pressed)?,
@@ -153,7 +156,7 @@ async fn handle_client(conn: Connection, password: String) -> Result<()> {
     }
 }
 
-async fn match_message(msg: &ClientMessage, mut send: quinn::SendStream, password: &str) -> Result<quinn::SendStream> {
+async fn match_message(msg: &ClientMessage, mut control_send: quinn::SendStream, password: &str) -> Result<quinn::SendStream> {
     match msg {
         ClientMessage::Handshake { version, password: client_password } => {
             if version != &PROTOCOL_VERSION {
@@ -161,25 +164,25 @@ async fn match_message(msg: &ClientMessage, mut send: quinn::SendStream, passwor
                     success: false,
                     reason: Some(String::from("Wrong protocol version")),
                 })?;
-                send.write_all(&bytes).await?;
+                control_send.write_all(&bytes).await?;
                 Err(anyhow::anyhow!("Wrong version"))
             } else if client_password == password {
                 let bytes = encode(&ServerMessage::AuthResult {
                     success: true,
                     reason: None,
                 })?;
-                send.write_all(&bytes).await?;
-                Ok(send)
+                control_send.write_all(&bytes).await?;
+                Ok(control_send)
             } else {
                 let bytes = encode(&ServerMessage::AuthResult {
                     success: false,
                     reason: Some(String::from("Wrong password")),
                 })?;
-                send.write_all(&bytes).await?;
+                control_send.write_all(&bytes).await?;
                 Err(anyhow::anyhow!("Wrong password"))
             }
         }
-        _ => Ok(send)
+        _ => Ok(control_send)
     }
 }
 

@@ -41,7 +41,8 @@ pub struct Receiver {
 
 pub struct Connection {
     pub sender: Sender,
-    pub receiver: Receiver,
+    pub control_recv: Receiver,
+    pub frame_recv: Receiver,
 }
 
 impl Connection {
@@ -70,12 +71,16 @@ impl Connection {
         let conn = endpoint.connect(addr.parse()?, "altreach")?.await?;
         tracing::info!("QUIC connection established");
 
-        let (send, recv) = conn.open_bi().await?;
-        tracing::info!("Stream ready");
+        let ((send, control_recv), (_, frame_recv)) = tokio::try_join!(
+            conn.open_bi(),
+            conn.open_bi(),
+        )?;
+        tracing::info!("Streams ready");
 
         Ok(Self {
             sender: Sender { send },
-            receiver: Receiver { recv, buf: Vec::new() },
+            control_recv: Receiver { recv: control_recv, buf: Vec::new() },
+            frame_recv: Receiver { recv: frame_recv, buf: Vec::new() },
         })
     }
 }
