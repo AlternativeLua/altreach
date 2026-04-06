@@ -61,6 +61,12 @@ impl Connection {
             quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?
         ));
 
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_uni_streams(1_u8.into());
+
+        let mut client_config = client_config;
+        client_config.transport_config(Arc::new(transport));
+
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
         endpoint.set_default_client_config(client_config);
 
