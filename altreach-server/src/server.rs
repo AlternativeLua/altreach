@@ -19,9 +19,13 @@ pub async fn run(addr: &str, password: String) -> Result<()> {
         .with_single_cert(vec![cert_der], key_der)?;
     server_crypto.alpn_protocols = vec![b"altreach".to_vec()];
 
-    let server_config = ServerConfig::with_crypto(Arc::new(
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_bidi_streams(1_u8.into());
+
+    let mut server_config = ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?
     ));
+    server_config.transport_config(Arc::new(transport));
 
     let endpoint = Endpoint::server(server_config, addr.parse()?)?;
     info!("Listening on {addr}");
