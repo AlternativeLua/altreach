@@ -40,6 +40,7 @@ pub struct Receiver {
 }
 
 pub struct Connection {
+    _conn: quinn::Connection, // must be kept alive — dropping it closes the QUIC connection
     pub sender: Sender,
     pub control_recv: Receiver,
     pub frame_recv: Receiver,
@@ -78,6 +79,7 @@ impl Connection {
         tracing::info!("Streams ready");
 
         Ok(Self {
+            _conn: conn,
             sender: Sender { send },
             control_recv: Receiver { recv: control_recv, buf: Vec::new() },
             frame_recv: Receiver { recv: frame_recv, buf: Vec::new() },
