@@ -20,7 +20,9 @@ pub async fn run(addr: &str, password: String) -> Result<()> {
     server_crypto.alpn_protocols = vec![b"altreach".to_vec()];
 
     let mut transport = quinn::TransportConfig::default();
-    transport.max_concurrent_bidi_streams(1_u8.into());
+    transport.max_concurrent_bidi_streams(100_u32.into());
+    transport.max_concurrent_uni_streams(100_u32.into());
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
 
     let mut server_config = ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?

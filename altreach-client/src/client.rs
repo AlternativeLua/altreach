@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 use anyhow::Result;
 use quinn::{ClientConfig, Endpoint, RecvStream, SendStream};
 use rustls::pki_types::{ServerName, UnixTime};
@@ -62,7 +63,9 @@ impl Connection {
         ));
 
         let mut transport = quinn::TransportConfig::default();
-        transport.max_concurrent_uni_streams(1_u8.into());
+        transport.max_concurrent_bidi_streams(100_u32.into());
+        transport.max_concurrent_uni_streams(100_u32.into());
+        transport.keep_alive_interval(Some(Duration::from_secs(5)));
 
         let mut client_config = client_config;
         client_config.transport_config(Arc::new(transport));
