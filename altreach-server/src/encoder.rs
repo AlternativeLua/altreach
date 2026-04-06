@@ -412,24 +412,29 @@ impl H264Encoder {
                         }
                     }
 
-                    let is_key = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
                     let already_has_sps = annex_b_has_sps(&bitstream);
+                    // Detect IDR by inspecting NAL type 5 directly — AMD does not
+                    // reliably set MFSampleExtension_CleanPoint on output samples.
+                    let has_idr_nal = annex_b_has_idr(&bitstream);
 
                     // Drop pre-IDR P-frames: the client cannot decode them without a
                     // preceding IDR, and AMD async encoders often produce a run of
                     // P-frames at startup before the first keyframe.
-                    if !is_key && !already_has_sps && !self.headers_sent {
+                    if !has_idr_nal && !already_has_sps && !self.headers_sent {
                         return Ok(None);
                     }
 
-                    // Prepend SPS+PPS to IDR frames that don't have them inline.
-                    let data = if is_key && !already_has_sps && !self.sequence_header.is_empty() {
+                    // Prepend SPS+PPS to every IDR frame that doesn't already carry them.
+                    // Do this unconditionally on IDR detection (not via CleanPoint) so that
+                    // periodic keyframes also carry parameter sets — required for the client
+                    // decoder to reset its reference state correctly.
+                    let data = if has_idr_nal && !already_has_sps && !self.sequence_header.is_empty() {
                         self.headers_sent = true;
                         let mut v = self.sequence_header.clone();
                         v.extend_from_slice(&bitstream);
                         v
                     } else {
-                        if already_has_sps || is_key {
+                        if already_has_sps || has_idr_nal {
                             self.headers_sent = true;
                         }
                         bitstream
@@ -446,22 +451,30 @@ impl H264Encoder {
     }
 }
 
+/// Returns true if the Annex B bitstream contains an IDR slice NAL (type 5).
+fn annex_b_has_idr(data: &[u8]) -> bool {
+    annex_b_has_nal_type(data, 5)
+}
+
 /// Returns true if the Annex B bitstream already contains a SPS NAL unit
 /// (NAL type 7), meaning the encoder embedded param sets inline.
 fn annex_b_has_sps(data: &[u8]) -> bool {
+    annex_b_has_nal_type(data, 7)
+}
+
+fn annex_b_has_nal_type(data: &[u8], nal_type: u8) -> bool {
     let mut i = 0;
     while i + 3 < data.len() {
-        let (start_code_len, nal_offset) = if data[i..].starts_with(&[0, 0, 0, 1]) {
-            (4usize, i + 4)
+        let nal_offset = if data[i..].starts_with(&[0, 0, 0, 1]) {
+            i + 4
         } else if data[i..].starts_with(&[0, 0, 1]) {
-            (3usize, i + 3)
+            i + 3
         } else {
             i += 1;
             continue;
         };
-        let _ = start_code_len;
-        if nal_offset < data.len() && (data[nal_offset] & 0x1F) == 7 {
-            return true; // SPS NAL type
+        if nal_offset < data.len() && (data[nal_offset] & 0x1F) == nal_type {
+            return true;
         }
         i += 1;
     }
